@@ -1,0 +1,17 @@
+{
+  "name": "TaxiHub - Taxi Rank Navigator",
+  "short_name": "TaxiHub",
+  "description": "Find taxi ranks and navigate with ease",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#667eea",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/vite.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
