@@ -31,19 +31,84 @@ Replace the default rules with:
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allow read access to taxi ranks for everyone
+
+    // Helper function to check if user is admin
+    function isAdmin() {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/marshalls/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/marshalls/$(request.auth.uid)).data.role == 'Admin';
+    }
+
+    // Helper function to check if user has specific role
+    function hasRole(role) {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/marshalls/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/marshalls/$(request.auth.uid)).data.role == role;
+    }
+
+    // Allow read access to taxi ranks for everyone (public access for users)
     match /taxiRanks/{rankId} {
       allow read: if true;
-      allow write: if request.auth != null;
+      allow write: if hasRole('Marshal') || hasRole('Admin');
     }
-    
-    // Only authenticated marshals can access taxis and loads
+
+    // Only authenticated marshals can access taxis and loads for their rank
     match /taxis/{taxiId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if hasRole('Marshal') || hasRole('Admin');
     }
-    
+
     match /loads/{loadId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if hasRole('Marshal') || hasRole('Admin');
+    }
+
+    // Marshalls collection - FIXED to allow registration and admin queries
+    match /marshalls/{userId} {
+      // Users can read their own profile by document ID
+      allow read: if request.auth != null && request.auth.uid == userId;
+
+      // Allow admins to list/query all marshals (for admin panel)
+      allow list: if isAdmin();
+
+      // Allow users to CREATE their own profile during registration (when doc doesn't exist)
+      allow create: if request.auth != null &&
+        request.auth.uid == userId &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.approved == false &&
+        request.resource.data.role == null;
+
+      // Users can update their own profile (but cannot change critical fields)
+      allow update: if request.auth != null &&
+        request.auth.uid == userId &&
+        request.resource.data.approved == resource.data.approved &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.rank == resource.data.rank;
+
+      // Admins can fully update any profile (including approval and role assignment)
+      allow update: if isAdmin();
+
+      // Admins can delete profiles
+      allow delete: if isAdmin();
+    }
+
+    // Activity logs - authenticated users can create, admins can read all
+    match /activityLogs/{logId} {
+      allow read, list: if isAdmin();
+      allow create: if request.auth != null;
+    }
+
+    // Reports - supervisors and admins can read
+    match /reports/{reportId} {
+      allow read: if hasRole('Supervisor') || hasRole('Admin');
+    }
+
+    // Payments - marshals and admins can read/write
+    match /payments/{paymentId} {
+      allow read, write: if hasRole('Marshal') || hasRole('Admin');
+    }
+
+    // Meetings - marshals and admins can read/write
+    match /meetings/{meetingId} {
+      allow read, write: if hasRole('Marshal') || hasRole('Admin');
     }
   }
 }

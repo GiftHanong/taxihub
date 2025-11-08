@@ -1,17 +1,68 @@
-# TODO for Marshal Profile Integration and Filtering
+# MarshalApp Admin CRUD Implementation
 
-- [x] Fetch marshal profile on login from Firestore "marshalls" collection.
-- [x] Store marshal profile in state in MarshalApp.
-- [x] Filter taxis, taxi ranks, payments, and loads by marshal's assigned rank.
-- [x] Restrict UI data shown in MarshalDashboard based on marshal's rank.
-- [x] Automatically create marshal and supervisor accounts when admin registers a taxi rank.
-- [x] Pre-approve auto-created accounts with temporary password.
-- [x] Ensure collections (taxis, payments, loads) are accessible based on role-based filtering.
-- [ ] Test marshal login and verify profile fetching.
-- [ ] Test data filtering by marshal rank for taxis, payments, loads.
-- [ ] Verify UI restrictions and actions based on marshal role and rank.
-- [ ] Test auto-creation of accounts when admin adds taxi rank.
-- [ ] Verify auto-created accounts can login and access only their rank's data.
-- [ ] Fix any bugs or issues found during testing.
-- [ ] Consider adding role-based UI restrictions if needed.
-- [ ] Document changes and update README if necessary.
+## ✅ Completed Features
+- [x] Basic admin panel with user approvals
+- [x] Admin account creation
+- [x] Basic taxi rank management
+- [x] Firebase security rules configured
+
+## 🚧 In Progress Features
+- [ ] Edit Taxi Ranks (name, address, GPS, description, aisles)
+- [ ] Edit Users (name, email, phone, role, rank)
+- [ ] Suspend/Unsuspend Users with visual indicators
+- [ ] Delete Users permanently with double confirmation
+- [ ] Enhanced Approved Users Table with actions
+- [ ] Update CSS for new modals and indicators
+
+## 📋 Implementation Steps
+1. **Edit Taxi Ranks Modal**
+   - Add edit button to rank table
+   - Create edit rank modal with GPS coordinates and aisle configuration
+   - Implement update functionality
+   - Auto-update assigned users when rank name changes
+
+2. **Edit Users Modal**
+   - Add edit button to approved users table
+   - Create edit user modal with all fields
+   - Implement update functionality
+   - Handle role and rank changes
+
+3. **Suspend/Unsuspend Users**
+   - Add suspend/unsuspend buttons
+   - Update user status in database
+   - Add red background visual indicator
+   - Prevent suspended users from logging in
+
+4. **Delete Users**
+   - Add delete button with confirmation
+   - Require typing "YES" for confirmation
+   - Remove from assigned ranks
+   - Permanent deletion from database
+
+5. **Enhanced Users Table**
+   - Replace simple list with organized table
+   - Show Name, Email, Phone, Role, Rank, Status
+   - Add action buttons (Edit/Suspend/Delete)
+
+6. **CSS Updates**
+   - Styles for edit modals
+   - Suspended user indicators
+   - Enhanced table styling
+   - Confirmation dialog styles
+
+## 🧪 Testing Checklist
+- [ ] Edit taxi rank functionality
+- [ ] Edit user functionality
+- [ ] Suspend/unsuspend users
+- [ ] Delete users with confirmation
+- [ ] Visual indicators for suspended users
+- [ ] Enhanced users table display
+- [ ] Firebase security rules validation
+- [ ] Mobile responsiveness
+
+## 🔧 Technical Notes
+- Firebase rules allow admin full CRUD on marshalls and taxiRanks
+- Use Timestamp.now() for update tracking
+- Log all admin actions to activityLogs
+- Handle rank name changes by updating all assigned users
+- Prevent deletion of last admin account

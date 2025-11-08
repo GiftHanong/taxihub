@@ -1,9 +1,9 @@
-/* Enhanced MarshalApp.jsx - Professional & Modernized */
+/* Enhanced MarshalApp.jsx - Fixed Role-Based Access Control */
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { auth, db } from '../../services/firebase';
 import { signInWithEmailAndPassword, signOut, createUserWithEmailAndPassword } from 'firebase/auth';
-import { collection, addDoc, getDocs, query, where, updateDoc, doc, orderBy, Timestamp, deleteDoc } from 'firebase/firestore';
+import { collection, addDoc, getDocs, query, where, updateDoc, doc, orderBy, Timestamp, deleteDoc, limit, getDoc, setDoc } from 'firebase/firestore';
 import storage from '../../services/storage';
 import './MarshalApp.css';
 
@@ -14,10 +14,9 @@ function MarshalApp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
-  const [marshalRank, setMarshalRank] = useState('');
-  const [marshalRole, setMarshalRole] = useState('');
+  const [marshalName, setMarshalName] = useState('');
+  const [marshalPhone, setMarshalPhone] = useState('');
   const [initialLoading, setInitialLoading] = useState(true);
-
   const [marshalProfile, setMarshalProfile] = useState(null);
 
   useEffect(() => {
@@ -25,14 +24,24 @@ function MarshalApp() {
       setUser(user);
       if (user) {
         try {
-          const q = query(collection(db, 'marshalls'), where('uid', '==', user.uid));
-          const querySnapshot = await getDocs(q);
-          if (!querySnapshot.empty) {
-            const profile = querySnapshot.docs[0].data();
+          // Use direct document access instead of query - this matches Firebase security rules
+          const docRef = doc(db, 'marshalls', user.uid);
+          const docSnap = await getDoc(docRef);
+          
+          if (docSnap.exists()) {
+            const profile = docSnap.data();
 
             // Check if marshal is approved
             if (!profile.approved) {
               setError('Your account is pending admin approval. Please contact an administrator.');
+              setMarshalProfile(null);
+              setInitialLoading(false);
+              return;
+            }
+
+            // Check if account is suspended
+            if (profile.suspended) {
+              setError('Your account has been suspended. Please contact an administrator.');
               await signOut(auth);
               setMarshalProfile(null);
               setInitialLoading(false);
@@ -41,13 +50,17 @@ function MarshalApp() {
 
             setMarshalProfile({
               ...profile,
-              docId: querySnapshot.docs[0].id
+              docId: docSnap.id
             });
           } else {
+            // Profile doesn't exist - user needs to complete registration or wait for approval
             setMarshalProfile(null);
           }
         } catch (error) {
-          console.error('Error fetching marshal profile:', error);
+          // Only log non-permission errors
+          if (error.code !== 'permission-denied') {
+            console.error('Error fetching marshal profile:', error);
+          }
           setMarshalProfile(null);
         }
       } else {
@@ -65,7 +78,24 @@ function MarshalApp() {
 
     try {
       await signInWithEmailAndPassword(auth, email, password);
+      
+      // Log login activity
+      await addDoc(collection(db, 'activityLogs'), {
+        action: 'login',
+        email: email,
+        timestamp: Timestamp.now(),
+        success: true
+      });
     } catch (err) {
+      // Log failed login attempt
+      await addDoc(collection(db, 'activityLogs'), {
+        action: 'login_failed',
+        email: email,
+        timestamp: Timestamp.now(),
+        success: false,
+        error: err.code
+      });
+      
       setError('Invalid email or password. Please try again.');
     } finally {
       setLoading(false);
@@ -77,66 +107,74 @@ function MarshalApp() {
     setLoading(true);
     setError('');
 
-    if (!marshalRank || !marshalRole) {
-      setError('Please select a rank and role');
+    if (!marshalName || !marshalPhone) {
+      setError('Please fill in all fields');
       setLoading(false);
       return;
     }
 
+    let newUser = null;
     try {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-      const newUser = userCredential.user;
+      newUser = userCredential.user;
 
-      // Determine permissions based on role
-      let permissions = ['view', 'record', 'manage']; // Default Marshal permissions
-      if (marshalRole === 'Admin') {
-        permissions = ['all'];
-      } else if (marshalRole === 'Supervisor') {
-        permissions = ['view', 'reports'];
-      } else if (marshalRole === 'Marshal') {
-        permissions = ['view', 'record', 'manage'];
-      }
+      // New users are created without role - admin will assign
+      // Use setDoc with user.uid as document ID to match security rules
+      await setDoc(doc(db, 'marshalls', newUser.uid), {
+        uid: newUser.uid,
+        email: newUser.email,
+        name: marshalName,
+        phone: marshalPhone,
+        role: null, // No role assigned initially
+        rank: null, // No rank assigned initially
+        permissions: [], // No permissions initially
+        approved: false, // Requires admin approval
+        suspended: false,
+        createdAt: Timestamp.now(),
+        lastLogin: null,
+        loginCount: 0
+      });
 
-      // Admins are automatically approved, others require admin approval
-      const isApproved = marshalRole === 'Admin';
-
-      // Try to create marshal profile with error handling
+      // Log registration activity
       try {
-        await addDoc(collection(db, 'marshalls'), {
-          uid: newUser.uid,
+        await addDoc(collection(db, 'activityLogs'), {
+          action: 'registration',
           email: newUser.email,
-          rank: marshalRank,
-          role: marshalRole,
-          permissions: permissions,
-          approved: isApproved,
-          createdAt: Timestamp.now()
+          name: marshalName,
+          timestamp: Timestamp.now(),
+          success: true
         });
-      } catch (firestoreError) {
-        console.error('Firestore write error:', firestoreError);
-
-        // If Firestore fails, still allow registration but show warning
-        setError('Account created but requires admin approval. Please contact an administrator.');
-
-        // Sign out the user since they need approval
-        await signOut(auth);
-        setLoading(false);
-        return;
+      } catch (logError) {
+        console.error('Failed to log activity:', logError);
+        // Continue even if logging fails
       }
 
-      // Allow the user to stay logged in - they can access the system but may have limited functionality until approved
+      // Sign out the user since they need approval
+      await signOut(auth);
+      
+      alert('✅ Registration successful! Your account is pending admin approval. An administrator will review your account and assign you a role and taxi rank.');
       setIsRegistering(false);
       setEmail('');
       setPassword('');
-      setMarshalRank('');
-      setMarshalRole('');
-
-      alert('✅ Registration successful! Your account is pending admin approval. You can now log in, but some features may be restricted until an administrator approves your account.');
+      setMarshalName('');
+      setMarshalPhone('');
       
     } catch (err) {
+      // If anything fails, make sure to sign out the user
+      if (newUser) {
+        try {
+          await signOut(auth);
+        } catch (signOutError) {
+          console.error('Failed to sign out after error:', signOutError);
+        }
+      }
+      
       if (err.code === 'auth/email-already-in-use') {
         setError('This email is already registered. Please login instead.');
       } else if (err.code === 'auth/weak-password') {
         setError('Password is too weak. Please use at least 6 characters.');
+      } else if (err.code === 'permission-denied') {
+        setError('Permission denied. Please check your internet connection and try again.');
       } else {
         setError('Registration failed: ' + err.message);
       }
@@ -147,6 +185,14 @@ function MarshalApp() {
 
   const handleLogout = async () => {
     try {
+      // Log logout activity
+      await addDoc(collection(db, 'activityLogs'), {
+        action: 'logout',
+        email: user.email,
+        timestamp: Timestamp.now(),
+        success: true
+      });
+      
       await signOut(auth);
     } catch (err) {
       console.error('Logout error:', err);
@@ -163,7 +209,7 @@ function MarshalApp() {
     );
   }
 
-  if (!user) {
+  if (!user || !marshalProfile) {
     return (
       <div className="marshal-app">
         <header className="marshal-header">
@@ -186,7 +232,18 @@ function MarshalApp() {
             {isRegistering ? (
               <form onSubmit={handleRegister}>
                 <div className="form-group">
-                  <label>Email Address</label>
+                  <label>Full Name *</label>
+                  <input
+                    type="text"
+                    value={marshalName}
+                    onChange={(e) => setMarshalName(e.target.value)}
+                    placeholder="John Doe"
+                    required
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label>Email Address *</label>
                   <input
                     type="email"
                     value={email}
@@ -197,7 +254,18 @@ function MarshalApp() {
                 </div>
 
                 <div className="form-group">
-                  <label>Password</label>
+                  <label>Phone Number *</label>
+                  <input
+                    type="tel"
+                    value={marshalPhone}
+                    onChange={(e) => setMarshalPhone(e.target.value)}
+                    placeholder="+27 12 345 6789"
+                    required
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label>Password *</label>
                   <input
                     type="password"
                     value={password}
@@ -208,30 +276,8 @@ function MarshalApp() {
                   />
                 </div>
 
-                <div className="form-group">
-                  <label>Rank / Station</label>
-                  <input
-                    type="text"
-                    value={marshalRank}
-                    onChange={(e) => setMarshalRank(e.target.value)}
-                    placeholder="Bree Taxi Rank"
-                    required
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label>Role</label>
-                  <select
-                    value={marshalRole}
-                    onChange={(e) => setMarshalRole(e.target.value)}
-                    className="select-input"
-                    required
-                  >
-                    <option value="">-- Select Role --</option>
-                    <option value="Admin">Admin (Full Access)</option>
-                    <option value="Marshal">Marshal (Record & View)</option>
-                    <option value="Supervisor">Supervisor (View & Reports)</option>
-                  </select>
+                <div className="info-box" style={{ marginBottom: '20px', padding: '12px', backgroundColor: '#fef3c7', borderRadius: '8px', fontSize: '0.875rem' }}>
+                  <strong>Note:</strong> After registration, an administrator will review your account and assign you a role (Marshal or Supervisor). Admin roles are created directly by existing administrators only.
                 </div>
 
                 <button type="submit" className="login-btn" disabled={loading}>
@@ -287,8 +333,8 @@ function MarshalApp() {
                 setIsRegistering(!isRegistering); 
                 setEmail('');
                 setPassword('');
-                setMarshalRank('');
-                setMarshalRole('');
+                setMarshalName('');
+                setMarshalPhone('');
               }}
             >
               {isRegistering ? 'Already have an account? Sign In' : 'New marshal? Register here'}
@@ -308,19 +354,19 @@ function MarshalDashboard({ user, marshalProfile, onLogout }) {
   const [taxiRanks, setTaxiRanks] = useState([]);
   const [loads, setLoads] = useState([]);
   const [payments, setPayments] = useState([]);
+  const [meetings, setMeetings] = useState([]);
   const [selectedTaxi, setSelectedTaxi] = useState('');
   const [loading, setLoading] = useState(false);
   const [searchReg, setSearchReg] = useState('');
   const [showAddTaxiModal, setShowAddTaxiModal] = useState(false);
   const [showAddRankModal, setShowAddRankModal] = useState(false);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [showAssignModal, setShowAssignModal] = useState(false);
-  const [showEditTaxiModal, setShowEditTaxiModal] = useState(false);
-  const [editingTaxi, setEditingTaxi] = useState(null);
+  const [showMeetingModal, setShowMeetingModal] = useState(false);
   const [timeFilter, setTimeFilter] = useState('today');
   const [pendingUsers, setPendingUsers] = useState([]);
-  const [loadingPending, setLoadingPending] = useState(false);
   const [approvedMarshals, setApprovedMarshals] = useState([]);
+  const [activityLogs, setActivityLogs] = useState([]);
+  const [reports, setReports] = useState([]);
   const [stats, setStats] = useState({
     today: 0,
     week: 0,
@@ -330,132 +376,75 @@ function MarshalDashboard({ user, marshalProfile, onLogout }) {
     pendingPayments: 0
   });
 
-  // Permission checker
+  // Role-based permission checker
   const hasPermission = (action) => {
-    if (!marshalProfile) return false;
-    if (marshalProfile.permissions?.includes('all')) return true;
-    return marshalProfile.permissions?.includes(action) || false;
+    if (!marshalProfile || !marshalProfile.role) return false;
+    
+    const permissions = {
+      'Admin': ['view', 'approve_users', 'assign_roles', 'manage_users', 'view_reports', 'system_settings'],
+      'Supervisor': ['view', 'view_reports'],
+      'Marshal': ['view', 'add_ranks', 'add_taxis', 'record_loads', 'record_payments', 'manage_meetings']
+    };
+    
+    return permissions[marshalProfile.role]?.includes(action) || false;
   };
+
+  // Set initial tab based on role
+  useEffect(() => {
+    if (marshalProfile?.role === 'Admin') {
+      setActiveTab('admin');
+    } else if (marshalProfile?.role === 'Supervisor') {
+      setActiveTab('reports');
+    } else if (marshalProfile?.role === 'Marshal') {
+      setActiveTab('overview');
+    }
+  }, [marshalProfile]);
 
   useEffect(() => {
-    loadTaxis();
-    loadTaxiRanks();
-    loadLoads();
-    loadPayments();
-    if (hasPermission('all')) {
+    loadData();
+  }, [marshalProfile, timeFilter]);
+
+  const loadData = async () => {
+    if (!marshalProfile) return;
+
+    // Load data based on role
+    if (marshalProfile.role === 'Admin') {
       loadPendingUsers();
       loadApprovedMarshals();
+      loadActivityLogs();
+      loadReports();
+      loadTaxiRanks(); // Add this so admins can see and manage taxi ranks
+    } else if (marshalProfile.role === 'Supervisor') {
+      loadReports();
+      loadTaxis();
+      loadLoads();
+    } else if (marshalProfile.role === 'Marshal') {
+      loadTaxis();
+      loadTaxiRanks();
+      loadLoads();
+      loadPayments();
+      loadMeetings();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeFilter, marshalProfile]);
 
-  const loadTaxiRanks = async () => {
-    try {
-      let q = collection(db, 'taxiRanks');
-
-      // Filter by marshal's rank only for supervisors
-      if (marshalProfile && marshalProfile.rank && marshalProfile.role === 'Supervisor') {
-        q = query(collection(db, 'taxiRanks'), where('name', '==', marshalProfile.rank));
-      }
-
-      const querySnapshot = await getDocs(q);
-      const ranksList = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      setTaxiRanks(ranksList);
-    } catch (error) {
-      console.error('Error loading taxi ranks:', error);
+    // Update last login
+    if (marshalProfile?.docId) {
+      const marshalRef = doc(db, 'marshalls', marshalProfile.docId);
+      await updateDoc(marshalRef, {
+        lastLogin: Timestamp.now(),
+        loginCount: (marshalProfile.loginCount || 0) + 1
+      });
     }
-  };
-
-  const loadPayments = async () => {
-    try {
-      const now = new Date();
-      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-
-      let q = query(
-        collection(db, 'payments'),
-        where('paymentDate', '>=', Timestamp.fromDate(startOfMonth)),
-        orderBy('paymentDate', 'desc')
-      );
-
-      // Filter by marshal's rank taxis if not admin
-      if (marshalProfile && marshalProfile.rank && !hasPermission('all')) {
-        const taxisQuery = query(
-          collection(db, 'taxis'), 
-          where('assignedRank.rankName', '==', marshalProfile.rank)
-        );
-        const taxisSnapshot = await getDocs(taxisQuery);
-        const taxiIds = taxisSnapshot.docs.map(doc => doc.id);
-
-        if (taxiIds.length > 0) {
-          const batchSize = 10;
-          const batches = [];
-          for (let i = 0; i < taxiIds.length; i += batchSize) {
-            batches.push(taxiIds.slice(i, i + batchSize));
-          }
-
-          const allPayments = [];
-          for (const batch of batches) {
-            const batchQuery = query(
-              collection(db, 'payments'),
-              where('paymentDate', '>=', Timestamp.fromDate(startOfMonth)),
-              where('taxiId', 'in', batch),
-              orderBy('paymentDate', 'desc')
-            );
-            const batchSnapshot = await getDocs(batchQuery);
-            allPayments.push(...batchSnapshot.docs.map(doc => ({
-              id: doc.id,
-              ...doc.data()
-            })));
-          }
-          
-          setPayments(allPayments);
-          calculateFinances(allPayments);
-          return;
-        } else {
-          setPayments([]);
-          calculateFinances([]);
-          return;
-        }
-      }
-
-      const querySnapshot = await getDocs(q);
-      const paymentsList = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-
-      setPayments(paymentsList);
-      calculateFinances(paymentsList);
-    } catch (error) {
-      console.error('Error loading payments:', error);
-      setPayments([]);
-      calculateFinances([]);
-    }
-  };
-
-  const calculateFinances = (paymentsList) => {
-    const totalRevenue = paymentsList.reduce((sum, payment) => sum + (payment.amount || 0), 0);
-    const pendingPayments = taxis.filter(t => !isMembershipValid(t)).length;
-
-    setStats(prev => ({
-      ...prev,
-      totalRevenue,
-      pendingPayments
-    }));
   };
 
   const loadTaxis = async () => {
     try {
       let q = collection(db, 'taxis');
       
-      // Filter by marshal's rank if not admin
-      if (marshalProfile && marshalProfile.rank && !hasPermission('all')) {
+      // Filter by marshal's rank if assigned
+      if (marshalProfile?.rank && marshalProfile.role !== 'Admin') {
         q = query(
           collection(db, 'taxis'), 
-          where('assignedRank.rankName', '==', marshalProfile.rank)
+          where('assignedRank', '==', marshalProfile.rank)
         );
       }
       
@@ -465,10 +454,21 @@ function MarshalDashboard({ user, marshalProfile, onLogout }) {
         ...doc.data()
       }));
       setTaxis(taxiList);
-      calculateFinances(payments);
-      calculateStats(loads, taxiList);
     } catch (error) {
       console.error('Error loading taxis:', error);
+    }
+  };
+
+  const loadTaxiRanks = async () => {
+    try {
+      const querySnapshot = await getDocs(collection(db, 'taxiRanks'));
+      const ranksList = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setTaxiRanks(ranksList);
+    } catch (error) {
+      console.error('Error loading taxi ranks:', error);
     }
   };
 
@@ -480,10 +480,8 @@ function MarshalDashboard({ user, marshalProfile, onLogout }) {
         startDate.setHours(0, 0, 0, 0);
       } else if (timeFilter === 'week') {
         startDate.setDate(startDate.getDate() - 7);
-        startDate.setHours(0, 0, 0, 0);
       } else if (timeFilter === 'month') {
         startDate.setMonth(startDate.getMonth() - 1);
-        startDate.setHours(0, 0, 0, 0);
       }
 
       let q = query(
@@ -492,48 +490,6 @@ function MarshalDashboard({ user, marshalProfile, onLogout }) {
         orderBy('timestamp', 'desc')
       );
 
-      // Filter by marshal's rank taxis if not admin
-      if (marshalProfile && marshalProfile.rank && !hasPermission('all')) {
-        const taxisQuery = query(
-          collection(db, 'taxis'), 
-          where('assignedRank.rankName', '==', marshalProfile.rank)
-        );
-        const taxisSnapshot = await getDocs(taxisQuery);
-        const taxiIds = taxisSnapshot.docs.map(doc => doc.id);
-
-        if (taxiIds.length > 0) {
-          const batchSize = 10;
-          const batches = [];
-          for (let i = 0; i < taxiIds.length; i += batchSize) {
-            batches.push(taxiIds.slice(i, i + batchSize));
-          }
-
-          const allLoads = [];
-          for (const batch of batches) {
-            const batchQuery = query(
-              collection(db, 'loads'),
-              where('timestamp', '>=', Timestamp.fromDate(startDate)),
-              where('taxiId', 'in', batch),
-              orderBy('timestamp', 'desc')
-            );
-            const batchSnapshot = await getDocs(batchQuery);
-            allLoads.push(...batchSnapshot.docs.map(doc => ({
-              id: doc.id,
-              ...doc.data()
-            })));
-          }
-          
-          setLoads(allLoads);
-          calculateStats(allLoads, taxis);
-          await storage.saveQueueData(allLoads);
-          return;
-        } else {
-          setLoads([]);
-          calculateStats([], taxis);
-          return;
-        }
-      }
-
       const querySnapshot = await getDocs(q);
       const loadsList = querySnapshot.docs.map(doc => ({
         id: doc.id,
@@ -541,16 +497,136 @@ function MarshalDashboard({ user, marshalProfile, onLogout }) {
       }));
 
       setLoads(loadsList);
-      calculateStats(loadsList, taxis);
-      await storage.saveQueueData(loadsList);
+      calculateStats(loadsList);
     } catch (error) {
       console.error('Error loading loads:', error);
-      setLoads([]);
-      calculateStats([], taxis);
     }
   };
 
-  const calculateStats = (loadsList, taxiList = taxis) => {
+  const loadPayments = async () => {
+    try {
+      const startOfMonth = new Date();
+      startOfMonth.setDate(1);
+      startOfMonth.setHours(0, 0, 0, 0);
+
+      const q = query(
+        collection(db, 'payments'),
+        where('paymentDate', '>=', Timestamp.fromDate(startOfMonth)),
+        orderBy('paymentDate', 'desc')
+      );
+
+      const querySnapshot = await getDocs(q);
+      const paymentsList = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+
+      setPayments(paymentsList);
+      calculateFinances(paymentsList);
+    } catch (error) {
+      console.error('Error loading payments:', error);
+    }
+  };
+
+  const loadMeetings = async () => {
+    try {
+      const q = query(
+        collection(db, 'meetings'),
+        orderBy('meetingDate', 'desc')
+      );
+
+      const querySnapshot = await getDocs(q);
+      const meetingsList = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+
+      setMeetings(meetingsList);
+    } catch (error) {
+      console.error('Error loading meetings:', error);
+    }
+  };
+
+  const loadPendingUsers = async () => {
+    try {
+      const q = query(collection(db, 'marshalls'), where('approved', '==', false));
+      const querySnapshot = await getDocs(q);
+      const pending = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setPendingUsers(pending);
+    } catch (error) {
+      console.error('Error loading pending users:', error);
+    }
+  };
+
+  const loadApprovedMarshals = async () => {
+    try {
+      const q = query(
+        collection(db, 'marshalls'), 
+        where('approved', '==', true),
+        orderBy('createdAt', 'desc')
+      );
+      const querySnapshot = await getDocs(q);
+      const approved = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setApprovedMarshals(approved);
+    } catch (error) {
+      console.error('Error loading approved marshals:', error);
+    }
+  };
+
+  const loadActivityLogs = async () => {
+    try {
+      const q = query(
+        collection(db, 'activityLogs'),
+        orderBy('timestamp', 'desc'),
+        limit(100)
+      );
+      const querySnapshot = await getDocs(q);
+      const logs = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setActivityLogs(logs);
+    } catch (error) {
+      console.error('Error loading activity logs:', error);
+    }
+  };
+
+  const loadReports = async () => {
+    try {
+      // Generate reports from existing data
+      const reportsData = {
+        dailyLoads: loads.filter(l => {
+          const loadDate = l.timestamp?.toDate();
+          const today = new Date();
+          return loadDate?.toDateString() === today.toDateString();
+        }).length,
+        weeklyRevenue: payments.reduce((sum, p) => {
+          const paymentDate = p.paymentDate?.toDate();
+          const weekAgo = new Date();
+          weekAgo.setDate(weekAgo.getDate() - 7);
+          return paymentDate > weekAgo ? sum + (p.amount || 0) : sum;
+        }, 0),
+        activeMarshals: approvedMarshals.filter(m => {
+          const lastLogin = m.lastLogin?.toDate();
+          const dayAgo = new Date();
+          dayAgo.setDate(dayAgo.getDate() - 1);
+          return lastLogin > dayAgo;
+        }).length,
+        totalTaxis: taxis.length
+      };
+      setReports(reportsData);
+    } catch (error) {
+      console.error('Error generating reports:', error);
+    }
+  };
+
+  const calculateStats = (loadsList) => {
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
@@ -568,84 +644,386 @@ function MarshalDashboard({ user, marshalProfile, onLogout }) {
       load.timestamp?.toDate() >= monthAgo
     );
 
-    const paidToday = todayLoads.filter(load => {
-      const taxi = taxiList.find(t => t.id === load.taxiId);
-      return isMembershipValid(taxi);
-    }).length;
-
     setStats(prev => ({
       ...prev,
       today: todayLoads.length,
       week: weekLoads.length,
-      month: monthLoads.length,
-      paidToday: paidToday
+      month: monthLoads.length
     }));
   };
 
-  const loadPendingUsers = async () => {
-    setLoadingPending(true);
-    try {
-      const q = query(collection(db, 'marshalls'), where('approved', '==', false));
-      const querySnapshot = await getDocs(q);
-      const pending = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      setPendingUsers(pending);
-    } catch (error) {
-      console.error('Error loading pending users:', error);
-    } finally {
-      setLoadingPending(false);
-    }
+  const calculateFinances = (paymentsList) => {
+    const totalRevenue = paymentsList.reduce((sum, payment) => sum + (payment.amount || 0), 0);
+    
+    setStats(prev => ({
+      ...prev,
+      totalRevenue,
+      paidToday: paymentsList.filter(p => {
+        const paymentDate = p.paymentDate?.toDate();
+        const today = new Date();
+        return paymentDate?.toDateString() === today.toDateString();
+      }).length
+    }));
   };
 
-  const loadApprovedMarshals = async () => {
-    try {
-      const q = query(collection(db, 'marshalls'), where('approved', '==', true));
-      const querySnapshot = await getDocs(q);
-      const approved = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      setApprovedMarshals(approved);
-    } catch (error) {
-      console.error('Error loading approved marshals:', error);
-    }
-  };
-
-  const approveMarshal = async (marshalId) => {
-    try {
-      const marshalRef = doc(db, 'marshalls', marshalId);
-      await updateDoc(marshalRef, {
-        approved: true,
-        approvedAt: Timestamp.now(),
-        approvedBy: user.email
-      });
-      alert('✅ Marshal approved successfully!');
-      loadPendingUsers();
-      loadApprovedMarshals();
-    } catch (error) {
-      console.error('Error approving marshal:', error);
-      alert('❌ Failed to approve marshal');
-    }
-  };
-
-  const rejectMarshal = async (marshalId) => {
-    if (!window.confirm('Are you sure you want to reject this marshal? This will delete their account.')) {
+  // Admin Functions
+  const approveUser = async (userId, role, rank) => {
+    if (!hasPermission('approve_users')) {
+      alert('❌ You do not have permission to approve users');
       return;
     }
 
     try {
-      await deleteDoc(doc(db, 'marshalls', marshalId));
-      alert('✅ Marshal rejected and account deleted');
+      // Set permissions based on role
+      let permissions = [];
+      if (role === 'Admin') {
+        permissions = ['view', 'approve_users', 'assign_roles', 'manage_users', 'view_reports', 'system_settings'];
+      } else if (role === 'Supervisor') {
+        permissions = ['view', 'view_reports'];
+      } else if (role === 'Marshal') {
+        permissions = ['view', 'add_ranks', 'add_taxis', 'record_loads', 'record_payments', 'manage_meetings'];
+      }
+
+      const userRef = doc(db, 'marshalls', userId);
+      await updateDoc(userRef, {
+        approved: true,
+        approvedAt: Timestamp.now(),
+        approvedBy: user.email,
+        role: role,
+        rank: rank,
+        permissions: permissions
+      });
+
+      // Log activity
+      await addDoc(collection(db, 'activityLogs'), {
+        action: 'user_approved',
+        userId: userId,
+        role: role,
+        rank: rank,
+        performedBy: user.email,
+        timestamp: Timestamp.now()
+      });
+
+      alert('✅ User approved successfully!');
+      loadPendingUsers();
+      loadApprovedMarshals();
+    } catch (error) {
+      console.error('Error approving user:', error);
+      alert('❌ Failed to approve user');
+    }
+  };
+
+  const rejectUser = async (userId) => {
+    if (!hasPermission('approve_users')) {
+      alert('❌ You do not have permission to reject users');
+      return;
+    }
+
+    if (!window.confirm('Are you sure you want to reject this user? This will delete their account.')) {
+      return;
+    }
+
+    try {
+      await deleteDoc(doc(db, 'marshalls', userId));
+
+      // Log activity
+      await addDoc(collection(db, 'activityLogs'), {
+        action: 'user_rejected',
+        userId: userId,
+        performedBy: user.email,
+        timestamp: Timestamp.now()
+      });
+
+      alert('✅ User rejected and account deleted');
       loadPendingUsers();
     } catch (error) {
-      console.error('Error rejecting marshal:', error);
-      alert('❌ Failed to reject marshal');
+      console.error('Error rejecting user:', error);
+      alert('❌ Failed to reject user');
+    }
+  };
+
+  // Admin Creation Function
+  const createAdmin = async (adminData) => {
+    if (!hasPermission('approve_users')) {
+      alert('❌ You do not have permission to create admin accounts');
+      return;
+    }
+
+    try {
+      // Create Firebase Auth user
+      const userCredential = await createUserWithEmailAndPassword(auth, adminData.email, adminData.password);
+      const newUser = userCredential.user;
+
+      // Add to marshalls collection with Admin role
+      await setDoc(doc(db, 'marshalls', newUser.uid), {
+        uid: newUser.uid,
+        email: newUser.email,
+        name: adminData.name,
+        phone: adminData.phone,
+        role: 'Admin',
+        rank: null, // Admins don't have assigned ranks
+        permissions: ['view', 'approve_users', 'assign_roles', 'manage_users', 'view_reports', 'system_settings'],
+        approved: true, // Admins are auto-approved
+        suspended: false,
+        createdAt: Timestamp.now(),
+        approvedAt: Timestamp.now(),
+        approvedBy: user.email,
+        lastLogin: null,
+        loginCount: 0
+      });
+
+      // Log activity
+      await addDoc(collection(db, 'activityLogs'), {
+        action: 'admin_created',
+        newAdminEmail: newUser.email,
+        newAdminName: adminData.name,
+        performedBy: user.email,
+        timestamp: Timestamp.now()
+      });
+
+      alert('✅ Admin account created successfully!');
+      loadApprovedMarshals();
+    } catch (error) {
+      if (error.code === 'auth/email-already-in-use') {
+        alert('❌ This email is already registered');
+      } else if (error.code === 'auth/weak-password') {
+        alert('❌ Password is too weak. Please use at least 6 characters');
+      } else {
+        console.error('Error creating admin:', error);
+        alert('❌ Failed to create admin account: ' + error.message);
+      }
+    }
+  };
+
+  // Edit Taxi Rank Function
+  const editTaxiRank = async (rankId, rankData) => {
+    if (!hasPermission('approve_users')) {
+      alert('❌ You do not have permission to edit taxi ranks');
+      return;
+    }
+
+    try {
+      const rankRef = doc(db, 'taxiRanks', rankId);
+      await updateDoc(rankRef, {
+        ...rankData,
+        updatedAt: Timestamp.now(),
+        updatedBy: user.email
+      });
+
+      // If rank name changed, update all assigned users
+      if (rankData.name !== rankToEdit?.name) {
+        const assignedUsers = approvedMarshals.filter(m =>
+          rankToEdit?.assignedMarshals?.includes(m.id) || m.rank === rankToEdit?.name
+        );
+
+        for (const user of assignedUsers) {
+          const userRef = doc(db, 'marshalls', user.id);
+          await updateDoc(userRef, {
+            rank: rankData.name,
+            updatedAt: Timestamp.now()
+          });
+        }
+      }
+
+      // Log activity
+      await addDoc(collection(db, 'activityLogs'), {
+        action: 'rank_edited',
+        rankId: rankId,
+        rankName: rankData.name,
+        performedBy: user.email,
+        timestamp: Timestamp.now()
+      });
+
+      alert('✅ Taxi rank updated successfully!');
+      loadTaxiRanks();
+      loadApprovedMarshals();
+    } catch (error) {
+      console.error('Error editing rank:', error);
+      alert('❌ Failed to update taxi rank: ' + error.message);
+    }
+  };
+
+  // Edit User Function
+  const editUser = async (userId, userData) => {
+    if (!hasPermission('manage_users')) {
+      alert('❌ You do not have permission to edit users');
+      return;
+    }
+
+    try {
+      const userRef = doc(db, 'marshalls', userId);
+      await updateDoc(userRef, {
+        ...userData,
+        updatedAt: Timestamp.now(),
+        updatedBy: user.email
+      });
+
+      // Log activity
+      await addDoc(collection(db, 'activityLogs'), {
+        action: 'user_edited',
+        userId: userId,
+        userEmail: userData.email,
+        performedBy: user.email,
+        timestamp: Timestamp.now()
+      });
+
+      alert('✅ User updated successfully!');
+      loadApprovedMarshals();
+    } catch (error) {
+      console.error('Error editing user:', error);
+      alert('❌ Failed to update user: ' + error.message);
+    }
+  };
+
+  // Suspend/Unsuspend User Function
+  const toggleUserSuspension = async (userId, currentStatus) => {
+    if (!hasPermission('manage_users')) {
+      alert('❌ You do not have permission to manage user status');
+      return;
+    }
+
+    const action = currentStatus ? 'unsuspend' : 'suspend';
+    const confirmMessage = currentStatus
+      ? 'Are you sure you want to unsuspend this user? They will be able to log in again.'
+      : 'Are you sure you want to suspend this user? They will not be able to log in until unsuspended.';
+
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    try {
+      const userRef = doc(db, 'marshalls', userId);
+      await updateDoc(userRef, {
+        suspended: !currentStatus,
+        suspendedAt: Timestamp.now(),
+        suspendedBy: user.email
+      });
+
+      // Log activity
+      await addDoc(collection(db, 'activityLogs'), {
+        action: action,
+        userId: userId,
+        performedBy: user.email,
+        timestamp: Timestamp.now()
+      });
+
+      alert(`✅ User ${action}ed successfully!`);
+      loadApprovedMarshals();
+    } catch (error) {
+      console.error(`Error ${action}ing user:`, error);
+      alert(`❌ Failed to ${action} user: ` + error.message);
+    }
+  };
+
+  // Delete User Function
+  const deleteUser = async (userId, userEmail) => {
+    if (!hasPermission('manage_users')) {
+      alert('❌ You do not have permission to delete users');
+      return;
+    }
+
+    // Check if this is the last admin
+    const adminCount = approvedMarshals.filter(m => m.role === 'Admin').length;
+    const userToDelete = approvedMarshals.find(m => m.id === userId);
+
+    if (userToDelete?.role === 'Admin' && adminCount <= 1) {
+      alert('❌ Cannot delete the last admin account. Create another admin first.');
+      return;
+    }
+
+    const confirmation = prompt(`⚠️ DANGER ZONE ⚠️\n\nYou are about to permanently delete user: ${userEmail}\n\nThis action cannot be undone and will:\n- Delete all user data\n- Remove from all assigned ranks\n- Delete login history\n\nType "YES" to confirm deletion:`);
+
+    if (confirmation !== 'YES') {
+      alert('Deletion cancelled');
+      return;
+    }
+
+    try {
+      // Remove user from all assigned ranks
+      const ranksToUpdate = taxiRanks.filter(rank =>
+        rank.assignedMarshals?.includes(userId)
+      );
+
+      for (const rank of ranksToUpdate) {
+        const rankRef = doc(db, 'taxiRanks', rank.id);
+        const updatedMarshals = rank.assignedMarshals.filter(id => id !== userId);
+        await updateDoc(rankRef, {
+          assignedMarshals: updatedMarshals,
+          updatedAt: Timestamp.now()
+        });
+      }
+
+      // Delete user document
+      await deleteDoc(doc(db, 'marshalls', userId));
+
+      // Log activity
+      await addDoc(collection(db, 'activityLogs'), {
+        action: 'user_deleted',
+        deletedUserEmail: userEmail,
+        performedBy: user.email,
+        timestamp: Timestamp.now()
+      });
+
+      alert('✅ User permanently deleted!');
+      loadApprovedMarshals();
+      loadTaxiRanks();
+    } catch (error) {
+      console.error('Error deleting user:', error);
+      alert('❌ Failed to delete user: ' + error.message);
+    }
+  };
+
+  // Marshal Functions
+  const addTaxiRank = async (rankData) => {
+    if (!hasPermission('add_ranks')) {
+      alert('❌ You do not have permission to add taxi ranks');
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, 'taxiRanks'), {
+        ...rankData,
+        createdBy: user.email,
+        createdAt: Timestamp.now()
+      });
+
+      alert('✅ Taxi rank added successfully!');
+      loadTaxiRanks();
+    } catch (error) {
+      console.error('Error adding taxi rank:', error);
+      alert('❌ Failed to add taxi rank');
+    }
+  };
+
+  const addTaxi = async (taxiData) => {
+    if (!hasPermission('add_taxis')) {
+      alert('❌ You do not have permission to add taxis');
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, 'taxis'), {
+        ...taxiData,
+        assignedRank: marshalProfile.rank,
+        createdBy: user.email,
+        createdAt: Timestamp.now(),
+        totalLoads: 0
+      });
+
+      alert('✅ Taxi added successfully!');
+      loadTaxis();
+    } catch (error) {
+      console.error('Error adding taxi:', error);
+      alert('❌ Failed to add taxi');
     }
   };
 
   const recordLoad = async () => {
+    if (!hasPermission('record_loads')) {
+      alert('❌ You do not have permission to record loads');
+      return;
+    }
+
     if (!selectedTaxi) {
       alert('Please select a taxi');
       return;
@@ -676,6 +1054,12 @@ function MarshalDashboard({ user, marshalProfile, onLogout }) {
       setSelectedTaxi('');
       loadLoads();
       loadTaxis();
+      
+      // Update stats immediately
+      setStats(prev => ({
+        ...prev,
+        today: prev.today + 1
+      }));
     } catch (error) {
       console.error('Error recording load:', error);
       alert('❌ Failed to record load. Please try again.');
@@ -684,1885 +1068,2533 @@ function MarshalDashboard({ user, marshalProfile, onLogout }) {
     }
   };
 
-  const handleDeleteTaxi = async (taxiId) => {
-    if (!hasPermission('all')) {
-      alert('❌ You do not have permission to delete taxis');
-      return;
-    }
-
-    if (!window.confirm('Are you sure you want to delete this taxi? This action cannot be undone.')) {
+  const recordPayment = async (paymentData) => {
+    if (!hasPermission('record_payments')) {
+      alert('❌ You do not have permission to record payments');
       return;
     }
 
     try {
-      await deleteDoc(doc(db, 'taxis', taxiId));
-      alert('✅ Taxi deleted successfully');
-      loadTaxis();
-    } catch (error) {
-      console.error('Error deleting taxi:', error);
-      alert('❌ Failed to delete taxi');
-    }
-  };
-
-  const handleEditTaxi = (taxi) => {
-    setEditingTaxi(taxi);
-    setShowEditTaxiModal(true);
-  };
-
-  const getTaxiLoadsByPeriod = (taxiId) => {
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const monthAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-    const taxiLoads = loads.filter(load => load.taxiId === taxiId);
-
-    const dayCount = taxiLoads.filter(load => load.timestamp?.toDate() >= today).length;
-    const weekCount = taxiLoads.filter(load => load.timestamp?.toDate() >= weekAgo).length;
-    const monthCount = taxiLoads.filter(load => load.timestamp?.toDate() >= monthAgo).length;
-
-    return { dayCount, weekCount, monthCount };
-  };
-
-  const getTaxiLoads = (taxiId) => {
-    return loads.filter(load => load.taxiId === taxiId).length;
-  };
-
-  const isMembershipValid = (taxi) => {
-    if (!taxi) return false;
-    if (!taxi.membershipPaidUntil) return false;
-
-    const now = new Date();
-    const paidUntil = taxi.membershipPaidUntil.toDate ? taxi.membershipPaidUntil.toDate() : new Date(taxi.membershipPaidUntil);
-
-    return (paidUntil.getMonth() === now.getMonth() && paidUntil.getFullYear() === now.getFullYear()) || paidUntil > now;
-  };
-
-  const getMembershipStatus = (taxi) => {
-    if (!taxi || !taxi.membershipPaidUntil) return 'Not Paid';
-
-    const paidUntil = taxi.membershipPaidUntil.toDate ? taxi.membershipPaidUntil.toDate() : new Date(taxi.membershipPaidUntil);
-    const now = new Date();
-
-    if (paidUntil < now) return 'Expired';
-    if (paidUntil.getMonth() === now.getMonth() && paidUntil.getFullYear() === now.getFullYear()) {
-      return 'Active';
-    }
-    return 'Expired';
-  };
-
-  const filteredTaxis = searchReg
-    ? taxis.filter(taxi =>
-        taxi.registration.toLowerCase().includes(searchReg.toLowerCase()) ||
-        taxi.driverName.toLowerCase().includes(searchReg.toLowerCase())
-      )
-    : taxis;
-
-  const getDueTaxis = () => taxis.filter(t => !isMembershipValid(t));
-
-  // Tabs configuration with permissions
-  const tabs = [
-    { id: 'overview', label: 'Overview', icon: '📊', permission: 'view' },
-    { id: 'record', label: 'Record Load', icon: '📦', permission: 'record' },
-    { id: 'payments', label: 'Payments', icon: '💳', permission: 'manage' }, // Marshals & Admins
-    { id: 'history', label: 'History', icon: '📜', permission: 'view' },
-    { id: 'taxis', label: 'All Taxis', icon: '🚖', permission: 'view' },
-    { id: 'ranks', label: 'Taxi Ranks', icon: '🚏', permission: 'view' },
-    { id: 'manage', label: 'Manage', icon: '⚙️', permission: 'manage' }, // Marshals & Admins
-    { id: 'reports', label: 'Reports', icon: '📄', permission: 'reports' }, // Supervisors only
-    { id: 'admin', label: 'Admin', icon: '👑', permission: 'all' } // Admin only
-  ];
-
-  return (
-    <div className="marshal-app">
-      <header className="marshal-header">
-        <div className="header-left">
-          <h1>🛡️ Marshal Dashboard</h1>
-          <p className="marshal-email">
-            {user.email}
-            <span className="marshal-role-badge">{marshalProfile?.role || 'Marshal'}</span>
-          </p>
-        </div>
-        <button onClick={onLogout} className="logout-btn">
-          Logout
-        </button>
-      </header>
-
-      <div className="dashboard-container">
-        {/* Stats Grid */}
-        <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-icon">🚖</div>
-            <div className="stat-content">
-              <div className="stat-value">{taxis.length}</div>
-              <div className="stat-label">Total Taxis</div>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-icon">📦</div>
-            <div className="stat-content">
-              <div className="stat-value">{stats.today}</div>
-              <div className="stat-label">Today's Loads</div>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-icon">📅</div>
-            <div className="stat-content">
-              <div className="stat-value">{stats.week}</div>
-              <div className="stat-label">This Week</div>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-icon">📊</div>
-            <div className="stat-content">
-              <div className="stat-value">{stats.month}</div>
-              <div className="stat-label">This Month</div>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-icon">💰</div>
-            <div className="stat-content">
-              <div className="stat-value">R{(stats.totalRevenue || 0).toFixed(2)}</div>
-              <div className="stat-label">Revenue (Month)</div>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-icon">⚠️</div>
-            <div className="stat-content">
-              <div className="stat-value">{stats.pendingPayments || 0}</div>
-              <div className="stat-label">Pending Payments</div>
-            </div>
-          </div>
-        </div>
-
-        {/* Tabs Navigation */}
-        <div className="tabs">
-          {tabs.map(tab => {
-            if (!hasPermission(tab.permission)) return null;
-            return (
-              <button
-                key={tab.id}
-                className={`tab ${activeTab === tab.id ? 'active' : ''}`}
-                onClick={() => setActiveTab(tab.id)}
-              >
-                {tab.icon} {tab.label}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Tab Content */}
-        {activeTab === 'overview' && (
-          <div className="tab-content">
-            <h2>Dashboard Overview</h2>
-            <OverviewTab stats={stats} taxis={taxis} loads={loads} payments={payments} />
-          </div>
-        )}
-
-        {activeTab === 'record' && hasPermission('record') && (
-          <div className="tab-content">
-            <div className="record-section">
-              <h2>Record New Load</h2>
-
-              <div className="form-group">
-                <label>Select Taxi</label>
-                <select
-                  value={selectedTaxi}
-                  onChange={(e) => setSelectedTaxi(e.target.value)}
-                  className="select-input"
-                >
-                  <option value="">-- Select Taxi --</option>
-                  {taxis.map(taxi => {
-                    const status = getMembershipStatus(taxi);
-                    return (
-                      <option key={taxi.id} value={taxi.id}>
-                        {taxi.registration} - {taxi.driverName} [{status}]
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-
-              {selectedTaxi && (
-                <div className="membership-info">
-                  {isMembershipValid(taxis.find(t => t.id === selectedTaxi)) ? (
-                    <div className="info-box success">
-                      ✅ Membership is valid for this month
-                    </div>
-                  ) : (
-                    <div className="info-box warning">
-                      ⚠️ Membership not paid for this month. Please collect payment.
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <button
-                onClick={recordLoad}
-                className="record-btn"
-                disabled={loading || !selectedTaxi}
-              >
-                {loading ? '⏳ Recording...' : '✓ Record Load'}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'payments' && (
-          <div className="tab-content">
-            <PaymentsTab
-              payments={payments}
-              taxis={taxis}
-              stats={stats}
-              getDueTaxis={getDueTaxis}
-              getTaxiLoads={getTaxiLoads}
-              setShowPaymentModal={setShowPaymentModal}
-              hasPermission={hasPermission}
-            />
-          </div>
-        )}
-
-        {activeTab === 'history' && (
-          <div className="tab-content">
-            <HistoryTab
-              loads={loads}
-              taxis={taxis}
-              isMembershipValid={isMembershipValid}
-              timeFilter={timeFilter}
-              setTimeFilter={setTimeFilter}
-            />
-          </div>
-        )}
-
-        {activeTab === 'taxis' && (
-          <div className="tab-content">
-            <TaxisTab
-              taxis={filteredTaxis}
-              searchReg={searchReg}
-              setSearchReg={setSearchReg}
-              getMembershipStatus={getMembershipStatus}
-              getTaxiLoadsByPeriod={getTaxiLoadsByPeriod}
-              handleEditTaxi={handleEditTaxi}
-              handleDeleteTaxi={handleDeleteTaxi}
-              hasPermission={hasPermission}
-            />
-          </div>
-        )}
-
-        {activeTab === 'ranks' && (
-          <div className="tab-content">
-            <RanksTab
-              taxiRanks={taxiRanks}
-              taxis={taxis}
-              hasPermission={hasPermission}
-            />
-          </div>
-        )}
-
-        {activeTab === 'manage' && (
-          <div className="tab-content">
-            <ManageTab
-              setShowAddTaxiModal={setShowAddTaxiModal}
-              setShowAddRankModal={setShowAddRankModal}
-              setShowAssignModal={setShowAssignModal}
-              hasPermission={hasPermission}
-            />
-          </div>
-        )}
-
-        {activeTab === 'reports' && (
-          <div className="tab-content">
-            <ReportsTab
-              taxis={taxis}
-              loads={loads}
-              payments={payments}
-              stats={stats}
-              marshalProfile={marshalProfile}
-            />
-          </div>
-        )}
-      </div>
-
-      {/* Modals */}
-      {showAddTaxiModal && (
-        <AddTaxiModal 
-          onClose={() => setShowAddTaxiModal(false)} 
-          onSuccess={loadTaxis} 
-        />
-      )}
-      {showAddRankModal && (
-        <AddRankModal 
-          onClose={() => setShowAddRankModal(false)} 
-          onSuccess={loadTaxiRanks}
-        />
-      )}
-      {showPaymentModal && (
-        <PaymentModal 
-          onClose={() => setShowPaymentModal(false)} 
-          taxis={taxis} 
-          onSuccess={() => { 
-            loadPayments(); 
-            loadTaxis(); 
-          }} 
-          user={user} 
-        />
-      )}
-      {showAssignModal && (
-        <AssignTaxiModal 
-          onClose={() => setShowAssignModal(false)} 
-          taxis={taxis} 
-          taxiRanks={taxiRanks} 
-          onSuccess={loadTaxis} 
-        />
-      )}
-      {showEditTaxiModal && editingTaxi && (
-        <EditTaxiModal
-          onClose={() => {
-            setShowEditTaxiModal(false);
-            setEditingTaxi(null);
-          }}
-          taxi={editingTaxi}
-          onSuccess={loadTaxis}
-        />
-      )}
-    </div>
-  );
-}
-
-// ===================================
-// OVERVIEW TAB COMPONENT
-// ===================================
-function OverviewTab({ stats, taxis, loads, payments }) {
-  const recentLoads = loads.slice(0, 5);
-  const recentPayments = payments.slice(0, 5);
-
-  return (
-    <div>
-      <div className="manage-section">
-        <div className="manage-card">
-          <h3>📈 Performance</h3>
-          <p>Track your daily targets and goals</p>
-          <div style={{ marginTop: '20px' }}>
-            <div style={{ marginBottom: '16px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                <span style={{ fontSize: '0.875rem', fontWeight: '600' }}>Daily Target</span>
-                <span style={{ fontSize: '0.875rem', fontWeight: '700' }}>{stats.today}/40</span>
-              </div>
-              <div style={{ width: '100%', height: '8px', background: '#e5e7eb', borderRadius: '4px' }}>
-                <div style={{ 
-                  width: `${Math.min((stats.today / 40) * 100, 100)}%`, 
-                  height: '100%', 
-                  background: '#10b981', 
-                  borderRadius: '4px',
-                  transition: 'width 0.3s'
-                }} />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="manage-card">
-          <h3>💳 Collections</h3>
-          <p>Payment collection status</p>
-          <div style={{ marginTop: '20px' }}>
-            <div style={{ marginBottom: '16px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                <span style={{ fontSize: '0.875rem', fontWeight: '600' }}>Collection Rate</span>
-                <span style={{ fontSize: '0.875rem', fontWeight: '700' }}>
-                  {taxis.length > 0 ? Math.round(((taxis.length - stats.pendingPayments) / taxis.length) * 100) : 0}%
-                </span>
-              </div>
-              <div style={{ width: '100%', height: '8px', background: '#e5e7eb', borderRadius: '4px' }}>
-                <div style={{ 
-                  width: `${taxis.length > 0 ? ((taxis.length - stats.pendingPayments) / taxis.length) * 100 : 0}%`, 
-                  height: '100%', 
-                  background: '#f59e0b', 
-                  borderRadius: '4px',
-                  transition: 'width 0.3s'
-                }} />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="manage-card">
-          <h3>📊 Activity</h3>
-          <p>Recent system activity</p>
-          <div style={{ marginTop: '20px', textAlign: 'left' }}>
-            <p style={{ fontSize: '0.875rem', marginBottom: '8px' }}>
-              ✅ <strong>{recentLoads.length}</strong> recent loads
-            </p>
-            <p style={{ fontSize: '0.875rem', marginBottom: '8px' }}>
-              💰 <strong>{recentPayments.length}</strong> recent payments
-            </p>
-            <p style={{ fontSize: '0.875rem' }}>
-              🚖 <strong>{taxis.length}</strong> registered taxis
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {recentLoads.length > 0 && (
-        <div style={{ marginTop: '32px' }}>
-          <h3 style={{ marginBottom: '16px', fontSize: '1.25rem', fontWeight: '700' }}>Recent Loads</h3>
-          <div className="loads-list">
-            {recentLoads.map(load => (
-              <div key={load.id} className="load-card">
-                <div className="load-header">
-                  <span className="load-reg">{load.registration}</span>
-                </div>
-                <div className="load-driver">{load.driverName}</div>
-                <div className="load-time">
-                  {load.timestamp?.toDate().toLocaleString()}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ===================================
-// PAYMENTS TAB COMPONENT
-// ===================================
-function PaymentsTab({ payments, taxis, stats, getDueTaxis, getTaxiLoads, setShowPaymentModal, hasPermission }) {
-  return (
-    <div>
-      <div className="payments-header">
-        <h2>Membership Payments</h2>
-        {hasPermission('all') && (
-          <button onClick={() => setShowPaymentModal(true)} className="add-payment-btn">
-            + Record Payment
-          </button>
-        )}
-      </div>
-
-      <div className="payments-summary">
-        <div className="summary-card">
-          <h3>This Month</h3>
-          <div className="summary-amount">R{(stats.totalRevenue || 0).toFixed(2)}</div>
-          <div className="summary-label">{payments.length} payments received</div>
-        </div>
-
-        <div className="summary-card warning">
-          <h3>Pending</h3>
-          <div className="summary-amount">{stats.pendingPayments || 0}</div>
-          <div className="summary-label">taxis need to pay</div>
-        </div>
-
-        <div className="summary-card">
-          <h3>Due this month</h3>
-          <div className="summary-amount">{getDueTaxis().length}</div>
-          <div className="summary-label">taxis flagged as due</div>
-        </div>
-      </div>
-
-      {payments.length === 0 ? (
-        <div className="empty-state">
-          <p>No payments recorded this month</p>
-        </div>
-      ) : (
-        <div className="payments-list">
-          {payments.map(payment => (
-            <div key={payment.id} className="payment-card">
-              <div className="payment-header">
-                <span className="payment-reg">{payment.registration}</span>
-                <span className="payment-amount">R{payment.amount.toFixed(2)}</span>
-              </div>
-              <div className="payment-driver">{payment.driverName}</div>
-              <div className="payment-details">
-                <span>📅 Month: {payment.paymentMonth} {payment.paymentYear}</span>
-                <span>💳 Type: {payment.paymentType}</span>
-              </div>
-              <div className="payment-date">
-                {payment.paymentDate?.toDate().toLocaleDateString()} - {payment.marshalEmail}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div style={{ marginTop: 24 }}>
-        <h3>Taxis due to pay this month</h3>
-        {getDueTaxis().length === 0 ? (
-          <div className="empty-state"><p>All taxis appear paid for this month ✅</p></div>
-        ) : (
-          <div className="taxis-list" style={{ marginTop: 12 }}>
-            {getDueTaxis().map(t => (
-              <div key={t.id} className="taxi-card">
-                <div className="taxi-header">
-                  <span className="taxi-reg">{t.registration}</span>
-                  <span className="membership-status not-paid">✗ Not Paid</span>
-                </div>
-                <div className="taxi-driver">{t.driverName}</div>
-                <div className="taxi-stats">
-                  <span>Loads: {getTaxiLoads(t.id)} (all time)</span>
-                  <span>Total: {t.totalLoads || 0}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ===================================
-// HISTORY TAB COMPONENT
-// ===================================
-function HistoryTab({ loads, taxis, isMembershipValid, timeFilter, setTimeFilter }) {
-  return (
-    <div>
-      <div className="history-header">
-        <h2>Load History</h2>
-        <div className="time-filter">
-          <button
-            className={`filter-btn ${timeFilter === 'today' ? 'active' : ''}`}
-            onClick={() => setTimeFilter('today')}
-          >
-            Today
-          </button>
-          <button
-            className={`filter-btn ${timeFilter === 'week' ? 'active' : ''}`}
-            onClick={() => setTimeFilter('week')}
-          >
-            This Week
-          </button>
-          <button
-            className={`filter-btn ${timeFilter === 'month' ? 'active' : ''}`}
-            onClick={() => setTimeFilter('month')}
-          >
-            This Month
-          </button>
-        </div>
-      </div>
-
-      {loads.length === 0 ? (
-        <div className="empty-state">
-          <p>No loads recorded for this period</p>
-        </div>
-      ) : (
-        <div className="loads-list">
-          {loads.map(load => {
-            const taxi = taxis.find(t => t.id === load.taxiId);
-            const paidNow = isMembershipValid(taxi);
-            return (
-              <div key={load.id} className="load-card">
-                <div className="load-header">
-                  <span className="load-reg">{load.registration}</span>
-                  <span className={`membership-badge ${paidNow ? 'paid' : 'unpaid'}`}>
-                    {paidNow ? '✓ Paid' : '✗ Unpaid'}
-                  </span>
-                </div>
-                <div className="load-driver">{load.driverName}</div>
-                <div className="load-time">
-                  📅 {load.timestamp?.toDate().toLocaleString()}
-                </div>
-                {load.marshalEmail && (
-                  <div className="load-time">
-                    👤 Marshal: {load.marshalEmail}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ===================================
-// TAXIS TAB COMPONENT
-// ===================================
-function TaxisTab({ taxis, searchReg, setSearchReg, getMembershipStatus, getTaxiLoadsByPeriod, handleEditTaxi, handleDeleteTaxi, hasPermission }) {
-  return (
-    <div>
-      <h2>All Registered Taxis</h2>
-
-      <div className="search-box-marshal">
-        <input
-          type="text"
-          placeholder="🔍 Search by registration or driver name..."
-          value={searchReg}
-          onChange={(e) => setSearchReg(e.target.value)}
-          className="search-input-marshal"
-        />
-      </div>
-
-      {taxis.length === 0 ? (
-        <div className="empty-state">
-          <p>No taxis found</p>
-        </div>
-      ) : (
-        <div className="taxis-list">
-          {taxis.map(taxi => {
-            const membershipStatus = getMembershipStatus(taxi);
-            const { dayCount, weekCount, monthCount } = getTaxiLoadsByPeriod(taxi.id);
-            
-            return (
-              <div key={taxi.id} className="taxi-card">
-                <div className="taxi-header">
-                  <span className="taxi-reg">{taxi.registration}</span>
-                  <span className={`membership-status ${membershipStatus.toLowerCase().replace(' ', '-')}`}>
-                    {membershipStatus === 'Active' ? '✓' : '✗'} {membershipStatus}
-                  </span>
-                </div>
-                <div className="taxi-driver">👤 {taxi.driverName}</div>
-                {taxi.phoneNumber && (
-                  <div className="taxi-driver" style={{ fontSize: '0.875rem', color: '#6b7280' }}>
-                    📞 {taxi.phoneNumber}
-                  </div>
-                )}
-                <div className="taxi-stats">
-                  <span>Today: {dayCount}</span>
-                  <span>Week: {weekCount}</span>
-                  <span>Month: {monthCount}</span>
-                  <span>Total: {taxi.totalLoads || 0}</span>
-                </div>
-                {taxi.assignedRank && (
-                  <div className="taxi-assignment">
-                    📍 {taxi.assignedRank.rankName} - Aisle {taxi.assignedRank.aisleNumber}
-                  </div>
-                )}
-                {taxi.membershipPaidUntil && (
-                  <div className="membership-date">
-                    Paid until: {taxi.membershipPaidUntil.toDate().toLocaleDateString('en-ZA', { month: 'long', year: 'numeric' })}
-                  </div>
-                )}
-                
-                {hasPermission('all') && (
-                  <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-                    <button
-                      onClick={() => handleEditTaxi(taxi)}
-                      className="manage-btn"
-                      style={{ flex: 1, padding: '8px 16px', fontSize: '0.875rem' }}
-                    >
-                      ✏️ Edit
-                    </button>
-                    <button
-                      onClick={() => handleDeleteTaxi(taxi.id)}
-                      className="remove-btn"
-                      style={{ flex: 1, padding: '8px 16px', fontSize: '0.875rem' }}
-                    >
-                      🗑️ Delete
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ===================================
-// RANKS TAB COMPONENT (NEW)
-// ===================================
-function RanksTab({ taxiRanks, taxis, hasPermission }) {
-  const getTaxisAtRank = (rankId) => {
-    return taxis.filter(taxi => taxi.assignedRank?.rankId === rankId);
-  };
-
-  const getTaxisAtAisle = (rankId, aisleNumber) => {
-    return taxis.filter(taxi => 
-      taxi.assignedRank?.rankId === rankId && 
-      taxi.assignedRank?.aisleNumber === aisleNumber
-    );
-  };
-
-  return (
-    <div>
-      <h2>Taxi Ranks & Routes</h2>
-      <p style={{ color: '#6b7280', marginBottom: '24px' }}>
-        View all taxi ranks, their aisles, and assigned routes
-      </p>
-
-      {taxiRanks.length === 0 ? (
-        <div className="empty-state">
-          <p>No taxi ranks found</p>
-        </div>
-      ) : (
-        <div className="manage-section">
-          {taxiRanks.map(rank => {
-            const taxisAtRank = getTaxisAtRank(rank.id);
-            
-            return (
-              <div key={rank.id} className="manage-card" style={{ textAlign: 'left' }}>
-                <h3 style={{ marginBottom: '12px' }}>🚏 {rank.name}</h3>
-                <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: '16px' }}>
-                  📍 {rank.address}
-                </p>
-
-                {rank.destinations && rank.destinations.length > 0 && (
-                  <div style={{ marginBottom: '16px', padding: '12px', background: '#fef3c7', borderRadius: '8px' }}>
-                    <p style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '4px' }}>
-                      Main Destinations:
-                    </p>
-                    <p style={{ fontSize: '0.875rem', color: '#92400e' }}>
-                      {rank.destinations.join(' • ')}
-                    </p>
-                  </div>
-                )}
-
-                <div style={{ marginBottom: '16px' }}>
-                  <p style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '8px' }}>
-                    📊 Statistics:
-                  </p>
-                  <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: '0.875rem', background: '#e5e7eb', padding: '4px 12px', borderRadius: '12px' }}>
-                      {rank.aisles?.length || 0} Aisles
-                    </span>
-                    <span style={{ fontSize: '0.875rem', background: '#dbeafe', padding: '4px 12px', borderRadius: '12px' }}>
-                      {taxisAtRank.length} Taxis
-                    </span>
-                  </div>
-                </div>
-
-                {rank.aisles && rank.aisles.length > 0 && (
-                  <div>
-                    <p style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '8px' }}>
-                      Aisles & Routes:
-                    </p>
-                    {rank.aisles.map(aisle => {
-                      const taxisInAisle = getTaxisAtAisle(rank.id, aisle.number);
-                      
-                      return (
-                        <div 
-                          key={aisle.number} 
-                          style={{ 
-                            background: '#f9fafb', 
-                            padding: '12px', 
-                            borderRadius: '8px', 
-                            marginBottom: '8px',
-                            border: '1px solid #e5e7eb'
-                          }}
-                        >
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                            <p style={{ fontSize: '0.875rem', fontWeight: '600' }}>
-                              Aisle {aisle.number}: {aisle.name}
-                            </p>
-                            <span style={{ 
-                              fontSize: '0.75rem', 
-                              background: taxisInAisle.length > 0 ? '#d1fae5' : '#fee2e2', 
-                              color: taxisInAisle.length > 0 ? '#065f46' : '#991b1b',
-                              padding: '2px 8px', 
-                              borderRadius: '10px',
-                              fontWeight: '600'
-                            }}>
-                              {taxisInAisle.length} {taxisInAisle.length === 1 ? 'Taxi' : 'Taxis'}
-                            </span>
-                          </div>
-                          <p style={{ fontSize: '0.8125rem', color: '#6b7280' }}>
-                            → {aisle.routes?.join(' • ') || 'No routes'}
-                          </p>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {rank.location && (
-                  <div style={{ marginTop: '12px', fontSize: '0.75rem', color: '#9ca3af' }}>
-                    📌 Coordinates: {rank.location.lat}, {rank.location.lng}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ===================================
-// MANAGE TAB COMPONENT (UPDATED)
-// ===================================
-function ManageTab({ setShowAddTaxiModal, setShowAddRankModal, setShowAssignModal, hasPermission }) {
-  const canManage = hasPermission('manage') || hasPermission('all');
-
-  return (
-    <div>
-      <h2>System Management</h2>
-      <p style={{ color: '#6b7280', marginBottom: '24px' }}>
-        Manage taxis, ranks, and system configuration
-      </p>
-
-      <div className="manage-section">
-        <div className="manage-card">
-          <h3>🚖 Add New Taxi</h3>
-          <p>Register a new taxi to the system</p>
-          {canManage ? (
-            <button onClick={() => setShowAddTaxiModal(true)} className="manage-btn">
-              Add Taxi
-            </button>
-          ) : (
-            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginTop: '12px', fontStyle: 'italic' }}>
-              ⚠️ Marshal or Admin permission required
-            </p>
-          )}
-        </div>
-
-        <div className="manage-card">
-          <h3>🚏 Add Taxi Rank</h3>
-          <p>Create a new taxi rank with routes and aisles</p>
-          {canManage ? (
-            <button onClick={() => setShowAddRankModal(true)} className="manage-btn">
-              Add Rank
-            </button>
-          ) : (
-            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginTop: '12px', fontStyle: 'italic' }}>
-              ⚠️ Marshal or Admin permission required
-            </p>
-          )}
-        </div>
-
-        <div className="manage-card">
-          <h3>📍 Assign to Rank</h3>
-          <p>Assign taxis to specific ranks and aisles</p>
-          {canManage ? (
-            <button onClick={() => setShowAssignModal(true)} className="manage-btn">
-              Assign Taxi
-            </button>
-          ) : (
-            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginTop: '12px', fontStyle: 'italic' }}>
-              ⚠️ Marshal or Admin permission required
-            </p>
-          )}
-        </div>
-      </div>
-
-      <div style={{ marginTop: '32px', padding: '20px', background: '#f3f4f6', borderRadius: '12px' }}>
-        <h3 style={{ fontSize: '1.125rem', marginBottom: '12px' }}>ℹ️ Permission Information</h3>
-        <div style={{ fontSize: '0.875rem', lineHeight: '1.6', color: '#4b5563' }}>
-          <p style={{ marginBottom: '8px' }}>
-            <strong>👑 Admin:</strong> Full system access - Can manage everything across all ranks
-          </p>
-          <p style={{ marginBottom: '8px' }}>
-            <strong>🛡️ Marshal:</strong> Can add/edit taxis, record loads, record payments, and manage ranks for their assigned station
-          </p>
-          <p>
-            <strong>👁️ Supervisor:</strong> View-only access - Can view all data and generate reports for their assigned rank
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ===================================
-// REPORTS TAB COMPONENT (NEW FOR SUPERVISORS)
-// ===================================
-function ReportsTab({ taxis, loads, payments, stats, marshalProfile }) {
-  const exportToCSV = (data, filename) => {
-    const csvContent = data.map(row => Object.values(row).join(',')).join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    link.click();
-  };
-
-  const generateTaxiReport = () => {
-    const reportData = taxis.map(taxi => ({
-      Registration: taxi.registration,
-      Driver: taxi.driverName,
-      Phone: taxi.phoneNumber || 'N/A',
-      TotalLoads: taxi.totalLoads || 0,
-      Status: taxi.membershipPaidUntil ? 'Active' : 'Inactive',
-      Rank: taxi.assignedRank?.rankName || 'Unassigned'
-    }));
-    exportToCSV(reportData, `taxis_report_${new Date().toISOString().split('T')[0]}.csv`);
-    alert('✅ Taxi report exported successfully!');
-  };
-
-  const generateLoadReport = () => {
-    const reportData = loads.map(load => ({
-      Date: load.timestamp?.toDate().toLocaleDateString() || 'N/A',
-      Time: load.timestamp?.toDate().toLocaleTimeString() || 'N/A',
-      Registration: load.registration,
-      Driver: load.driverName,
-      Marshal: load.marshalEmail || 'N/A'
-    }));
-    exportToCSV(reportData, `loads_report_${new Date().toISOString().split('T')[0]}.csv`);
-    alert('✅ Loads report exported successfully!');
-  };
-
-  const generatePaymentReport = () => {
-    const reportData = payments.map(payment => ({
-      Date: payment.paymentDate?.toDate().toLocaleDateString() || 'N/A',
-      Registration: payment.registration,
-      Driver: payment.driverName,
-      Amount: `R${payment.amount}`,
-      Month: payment.paymentMonth,
-      Year: payment.paymentYear,
-      Type: payment.paymentType,
-      Marshal: payment.marshalEmail || 'N/A'
-    }));
-    exportToCSV(reportData, `payments_report_${new Date().toISOString().split('T')[0]}.csv`);
-    alert('✅ Payment report exported successfully!');
-  };
-
-  return (
-    <div>
-      <h2>📊 Reports & Analytics</h2>
-      <p style={{ color: '#6b7280', marginBottom: '24px' }}>
-        Generate and export reports for {marshalProfile?.rank || 'your assigned rank'}
-      </p>
-
-      {/* Summary Cards */}
-      <div className="payments-summary" style={{ marginBottom: '32px' }}>
-        <div className="summary-card">
-          <h3>Total Taxis</h3>
-          <div className="summary-amount">{taxis.length}</div>
-          <div className="summary-label">Registered vehicles</div>
-        </div>
-
-        <div className="summary-card">
-          <h3>Total Loads</h3>
-          <div className="summary-amount">{stats.month}</div>
-          <div className="summary-label">This month</div>
-        </div>
-
-        <div className="summary-card">
-          <h3>Total Revenue</h3>
-          <div className="summary-amount">R{stats.totalRevenue.toFixed(2)}</div>
-          <div className="summary-label">This month</div>
-        </div>
-      </div>
-
-      {/* Export Reports */}
-      <div className="manage-section">
-        <div className="manage-card">
-          <h3>🚖 Taxi Report</h3>
-          <p>Export complete list of all registered taxis with their details</p>
-          <button onClick={generateTaxiReport} className="manage-btn">
-            📥 Export Taxi Report
-          </button>
-        </div>
-
-        <div className="manage-card">
-          <h3>📦 Loads Report</h3>
-          <p>Export detailed load history with timestamps and marshal info</p>
-          <button onClick={generateLoadReport} className="manage-btn">
-            📥 Export Loads Report
-          </button>
-        </div>
-
-        <div className="manage-card">
-          <h3>💰 Payment Report</h3>
-          <p>Export payment records with amounts and transaction details</p>
-          <button onClick={generatePaymentReport} className="manage-btn">
-            📥 Export Payment Report
-          </button>
-        </div>
-      </div>
-
-      {/* Performance Metrics */}
-      <div style={{ marginTop: '32px', padding: '24px', background: 'white', borderRadius: '16px', border: '2px solid #e5e7eb' }}>
-        <h3 style={{ fontSize: '1.25rem', marginBottom: '20px' }}>📈 Performance Metrics</h3>
-        
-        <div style={{ marginBottom: '24px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-            <span style={{ fontSize: '0.875rem', fontWeight: '600' }}>Payment Collection Rate</span>
-            <span style={{ fontSize: '0.875rem', fontWeight: '700' }}>
-              {taxis.length > 0 ? Math.round(((taxis.length - stats.pendingPayments) / taxis.length) * 100) : 0}%
-            </span>
-          </div>
-          <div style={{ width: '100%', height: '12px', background: '#e5e7eb', borderRadius: '6px' }}>
-            <div style={{ 
-              width: `${taxis.length > 0 ? ((taxis.length - stats.pendingPayments) / taxis.length) * 100 : 0}%`, 
-              height: '100%', 
-              background: 'linear-gradient(90deg, #10b981, #059669)', 
-              borderRadius: '6px',
-              transition: 'width 0.3s'
-            }} />
-          </div>
-        </div>
-
-        <div style={{ marginBottom: '24px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-            <span style={{ fontSize: '0.875rem', fontWeight: '600' }}>Daily Load Target (40 loads)</span>
-            <span style={{ fontSize: '0.875rem', fontWeight: '700' }}>{stats.today}/40</span>
-          </div>
-          <div style={{ width: '100%', height: '12px', background: '#e5e7eb', borderRadius: '6px' }}>
-            <div style={{ 
-              width: `${Math.min((stats.today / 40) * 100, 100)}%`, 
-              height: '100%', 
-              background: 'linear-gradient(90deg, #f59e0b, #d97706)', 
-              borderRadius: '6px',
-              transition: 'width 0.3s'
-            }} />
-          </div>
-        </div>
-
-        <div className="taxi-stats" style={{ marginTop: '20px', paddingTop: '20px', borderTop: '2px dashed #e5e7eb' }}>
-          <div>
-            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: '4px' }}>Today's Loads</p>
-            <p style={{ fontSize: '1.5rem', fontWeight: '700', color: '#111827' }}>{stats.today}</p>
-          </div>
-          <div>
-            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: '4px' }}>This Week</p>
-            <p style={{ fontSize: '1.5rem', fontWeight: '700', color: '#111827' }}>{stats.week}</p>
-          </div>
-          <div>
-            <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: '4px' }}>This Month</p>
-            <p style={{ fontSize: '1.5rem', fontWeight: '700', color: '#111827' }}>{stats.month}</p>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ===================================
-// ADMIN TAB COMPONENT (NEW FOR ADMINS)
-// ===================================
-function AdminTab({ pendingUsers, approvedMarshals, loadingPending, approveMarshal, rejectMarshal, loadPendingUsers, loadApprovedMarshals }) {
-  return (
-    <div>
-      <h2>👑 Admin Panel</h2>
-      <p style={{ color: '#6b7280', marginBottom: '24px' }}>
-        Manage marshal accounts and system approvals
-      </p>
-
-      <div className="manage-section">
-        <div className="manage-card">
-          <h3>⏳ Pending Approvals</h3>
-          <p>Marshals waiting for admin approval</p>
-          {loadingPending ? (
-            <div className="loading-spinner"></div>
-          ) : pendingUsers.length === 0 ? (
-            <div className="empty-state">
-              <p>No pending approvals</p>
-            </div>
-          ) : (
-            <div className="pending-users-list">
-              {pendingUsers.map(user => (
-                <div key={user.id} className="user-card">
-                  <div className="user-header">
-                    <span className="user-email">{user.email}</span>
-                    <span className="user-role">{user.role}</span>
-                  </div>
-                  <div className="user-details">
-                    <span>Rank: {user.rank}</span>
-                    <span>Created: {user.createdAt?.toDate().toLocaleDateString()}</span>
-                  </div>
-                  <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-                    <button
-                      onClick={() => approveMarshal(user.id)}
-                      className="manage-btn"
-                      style={{ flex: 1, padding: '8px 16px', fontSize: '0.875rem' }}
-                    >
-                      ✅ Approve
-                    </button>
-                    <button
-                      onClick={() => rejectMarshal(user.id)}
-                      className="remove-btn"
-                      style={{ flex: 1, padding: '8px 16px', fontSize: '0.875rem' }}
-                    >
-                      ❌ Reject
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="manage-card">
-          <h3>✅ Approved Marshals</h3>
-          <p>Currently approved system users</p>
-          {approvedMarshals.length === 0 ? (
-            <div className="empty-state">
-              <p>No approved marshals</p>
-            </div>
-          ) : (
-            <div className="approved-users-list">
-              {approvedMarshals.map(user => (
-                <div key={user.id} className="user-card approved">
-                  <div className="user-header">
-                    <span className="user-email">{user.email}</span>
-                    <span className="user-role">{user.role}</span>
-                  </div>
-                  <div className="user-details">
-                    <span>Rank: {user.rank}</span>
-                    <span>Approved: {user.approvedAt?.toDate().toLocaleDateString()}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ===================================
-// PAYMENT MODAL
-// ===================================
-function PaymentModal({ onClose, taxis, onSuccess, user }) {
-  const [formData, setFormData] = useState({
-    taxiId: '',
-    amount: '150',
-    paymentType: 'monthly_fee',
-    paymentMonth: new Date().getMonth(),
-    paymentYear: new Date().getFullYear(),
-    notes: ''
-  });
-  const [loading, setLoading] = useState(false);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-
-    try {
-      const selectedTaxi = taxis.find(t => t.id === formData.taxiId);
-
       await addDoc(collection(db, 'payments'), {
-        taxiId: formData.taxiId,
-        registration: selectedTaxi.registration,
-        driverName: selectedTaxi.driverName,
-        amount: parseFloat(formData.amount),
-        paymentType: formData.paymentType,
-        paymentMonth: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][formData.paymentMonth],
-        paymentYear: formData.paymentYear,
-        notes: formData.notes,
-        paymentDate: Timestamp.now(),
-        marshalId: user.uid,
-        marshalEmail: user.email
-      });
-
-      const paidUntilDate = new Date(formData.paymentYear, formData.paymentMonth, 1);
-      const taxiRef = doc(db, 'taxis', formData.taxiId);
-      await updateDoc(taxiRef, {
-        membershipPaidUntil: Timestamp.fromDate(paidUntilDate),
-        lastPaymentAmount: parseFloat(formData.amount),
-        lastPaymentDate: Timestamp.now()
+        ...paymentData,
+        recordedBy: user.email,
+        recordedAt: Timestamp.now()
       });
 
       alert('✅ Payment recorded successfully!');
-      onSuccess();
-      onClose();
+      loadPayments();
     } catch (error) {
       console.error('Error recording payment:', error);
       alert('❌ Failed to record payment');
-    } finally {
-      setLoading(false);
     }
   };
 
-  const months = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December'
-  ];
-
-  const currentYear = new Date().getFullYear();
-  const years = [currentYear - 1, currentYear, currentYear + 1];
-
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-        <h2>Record Membership Payment</h2>
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Select Taxi *</label>
-            <select
-              value={formData.taxiId}
-              onChange={(e) => setFormData({...formData, taxiId: e.target.value})}
-              className="select-input"
-              required
-            >
-              <option value="">-- Select Taxi --</option>
-              {taxis.map(taxi => (
-                <option key={taxi.id} value={taxi.id}>
-                  {taxi.registration} - {taxi.driverName}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="form-row">
-            <div className="form-group">
-              <label>Amount (R) *</label>
-              <input
-                type="number"
-                step="0.01"
-                value={formData.amount}
-                onChange={(e) => setFormData({...formData, amount: e.target.value})}
-                placeholder="150.00"
-                required
-              />
-            </div>
-
-            <div className="form-group">
-              <label>Payment Type *</label>
-              <select
-                value={formData.paymentType}
-                onChange={(e) => setFormData({...formData, paymentType: e.target.value})}
-                className="select-input"
-                required
-              >
-                <option value="monthly_fee">Monthly Association Fee</option>
-                <option value="registration">Registration Fee</option>
-                <option value="penalty">Penalty</option>
-                <option value="other">Other</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="form-row">
-            <div className="form-group">
-              <label>Payment For Month *</label>
-              <select
-                value={formData.paymentMonth}
-                onChange={(e) => setFormData({...formData, paymentMonth: parseInt(e.target.value)})}
-                className="select-input"
-                required
-              >
-                {months.map((month, index) => (
-                  <option key={index} value={index}>{month}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label>Year *</label>
-              <select
-                value={formData.paymentYear}
-                onChange={(e) => setFormData({...formData, paymentYear: parseInt(e.target.value)})}
-                className="select-input"
-                required
-              >
-                {years.map(year => (
-                  <option key={year} value={year}>{year}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label>Notes</label>
-            <textarea
-              value={formData.notes}
-              onChange={(e) => setFormData({...formData, notes: e.target.value})}
-              placeholder="Optional notes..."
-              rows="3"
-            />
-          </div>
-
-          <div className="modal-actions">
-            <button type="button" onClick={onClose} className="cancel-btn">
-              Cancel
-            </button>
-            <button type="submit" disabled={loading} className="submit-btn">
-              {loading ? '⏳ Recording...' : 'Record Payment'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-// ===================================
-// ASSIGN TAXI MODAL
-// ===================================
-function AssignTaxiModal({ onClose, taxis, taxiRanks, onSuccess }) {
-  const [formData, setFormData] = useState({
-    taxiId: '',
-    rankId: '',
-    aisleNumber: ''
-  });
-  const [selectedRank, setSelectedRank] = useState(null);
-  const [loading, setLoading] = useState(false);
-
-  const handleRankChange = (rankId) => {
-    setFormData({...formData, rankId, aisleNumber: ''});
-    const rank = taxiRanks.find(r => r.id === rankId);
-    setSelectedRank(rank);
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-
-    try {
-      const taxi = taxis.find(t => t.id === formData.taxiId);
-      const rank = taxiRanks.find(r => r.id === formData.rankId);
-      const aisle = rank.aisles.find(a => a.number === parseInt(formData.aisleNumber));
-
-      const taxiRef = doc(db, 'taxis', formData.taxiId);
-      await updateDoc(taxiRef, {
-        assignedRank: {
-          rankId: formData.rankId,
-          rankName: rank.name,
-          aisleNumber: parseInt(formData.aisleNumber),
-          aisleName: aisle.name,
-          routes: aisle.routes
-        },
-        updatedAt: Timestamp.now()
-      });
-
-      alert(`✅ ${taxi.registration} assigned to ${rank.name} - Aisle ${aisle.number}`);
-      onSuccess();
-      onClose();
-    } catch (error) {
-      console.error('Error assigning taxi:', error);
-      alert('❌ Failed to assign taxi');
-    } finally {
-      setLoading(false);
+  const createMeeting = async (meetingData) => {
+    if (!hasPermission('manage_meetings')) {
+      alert('❌ You do not have permission to create meetings');
+      return;
     }
-  };
-
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-        <h2>Assign Taxi to Rank</h2>
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Select Taxi *</label>
-            <select
-              value={formData.taxiId}
-              onChange={(e) => setFormData({...formData, taxiId: e.target.value})}
-              className="select-input"
-              required
-            >
-              <option value="">-- Select Taxi --</option>
-              {taxis.map(taxi => (
-                <option key={taxi.id} value={taxi.id}>
-                  {taxi.registration} - {taxi.driverName}
-                  {taxi.assignedRank && ` (Currently at ${taxi.assignedRank.rankName})`}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="form-group">
-            <label>Select Taxi Rank *</label>
-            <select
-              value={formData.rankId}
-              onChange={(e) => handleRankChange(e.target.value)}
-              className="select-input"
-              required
-            >
-              <option value="">-- Select Rank --</option>
-              {taxiRanks.map(rank => (
-                <option key={rank.id} value={rank.id}>
-                  {rank.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {selectedRank && (
-            <div className="form-group">
-              <label>Select Aisle *</label>
-              <select
-                value={formData.aisleNumber}
-                onChange={(e) => setFormData({...formData, aisleNumber: e.target.value})}
-                className="select-input"
-                required
-              >
-                <option value="">-- Select Aisle --</option>
-                {selectedRank.aisles.map(aisle => (
-                  <option key={aisle.number} value={aisle.number}>
-                    Aisle {aisle.number}: {aisle.name} → {aisle.routes.join(', ')}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          <div className="modal-actions">
-            <button type="button" onClick={onClose} className="cancel-btn">
-              Cancel
-            </button>
-            <button type="submit" disabled={loading || !selectedRank} className="submit-btn">
-              {loading ? '⏳ Assigning...' : 'Assign Taxi'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-// ===================================
-// ADD TAXI MODAL
-// ===================================
-function AddTaxiModal({ onClose, onSuccess }) {
-  const [formData, setFormData] = useState({
-    registration: '',
-    driverName: '',
-    phoneNumber: '',
-    paymentMonth: new Date().getMonth(),
-    paymentYear: new Date().getFullYear()
-  });
-  const [loading, setLoading] = useState(false);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
 
     try {
-      const paidUntilDate = new Date(formData.paymentYear, formData.paymentMonth, 1);
-
-      await addDoc(collection(db, 'taxis'), {
-        registration: formData.registration.toUpperCase(),
-        driverName: formData.driverName,
-        phoneNumber: formData.phoneNumber,
-        membershipPaidUntil: Timestamp.fromDate(paidUntilDate),
-        totalLoads: 0,
-        lastLoad: null,
+      await addDoc(collection(db, 'meetings'), {
+        ...meetingData,
+        createdBy: user.email,
         createdAt: Timestamp.now()
       });
 
-      alert('✅ Taxi added successfully!');
-      onSuccess();
-      onClose();
+      alert('✅ Meeting created successfully!');
+      loadMeetings();
     } catch (error) {
-      console.error('Error adding taxi:', error);
-      alert('❌ Failed to add taxi');
-    } finally {
-      setLoading(false);
+      console.error('Error creating meeting:', error);
+      alert('❌ Failed to create meeting');
     }
   };
 
-  const months = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December'
-  ];
-
-  const currentYear = new Date().getFullYear();
-  const years = [currentYear - 1, currentYear, currentYear + 1];
-
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-        <h2>Add New Taxi</h2>
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Registration Number *</label>
-            <input
-              type="text"
-              value={formData.registration}
-              onChange={(e) => setFormData({...formData, registration: e.target.value.toUpperCase()})}
-              placeholder="ABC123GP"
-              required
-            />
-          </div>
-
-          <div className="form-group">
-            <label>Driver Name *</label>
-            <input
-              type="text"
-              value={formData.driverName}
-              onChange={(e) => setFormData({...formData, driverName: e.target.value})}
-              placeholder="John Modise"
-              required
-            />
-          </div>
-
-          <div className="form-group">
-            <label>Phone Number</label>
-            <input
-              type="tel"
-              value={formData.phoneNumber}
-              onChange={(e) => setFormData({...formData, phoneNumber: e.target.value})}
-              placeholder="+27123456789"
-            />
-          </div>
-
-          <div className="membership-payment-section">
-            <h3>Membership Payment</h3>
-            <p className="hint">Select the month the membership is paid for</p>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label>Month *</label>
-                <select
-                  value={formData.paymentMonth}
-                  onChange={(e) => setFormData({...formData, paymentMonth: parseInt(e.target.value)})}
-                  className="select-input"
-                  required
-                >
-                  {months.map((month, index) => (
-                    <option key={index} value={index}>{month}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label>Year *</label>
-                <select
-                  value={formData.paymentYear}
-                  onChange={(e) => setFormData({...formData, paymentYear: parseInt(e.target.value)})}
-                  className="select-input"
-                  required
-                >
-                  {years.map(year => (
-                    <option key={year} value={year}>{year}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div className="modal-actions">
-            <button type="button" onClick={onClose} className="cancel-btn">
-              Cancel
-            </button>
-            <button type="submit" disabled={loading} className="submit-btn">
-              {loading ? '⏳ Adding...' : 'Add Taxi'}
+    <div className="marshal-dashboard">
+      {/* Header */}
+      <header className="dashboard-header">
+        <div className="header-content">
+          <h1>🛡️ TaxiHub Marshal Portal</h1>
+          <div className="user-info">
+            <span className="user-role">{marshalProfile?.role || 'Loading...'}</span>
+            {marshalProfile?.rank && <span className="user-rank">📍 {marshalProfile.rank}</span>}
+            <span className="user-email">{user.email}</span>
+            <button onClick={onLogout} className="logout-btn">
+              Logout
             </button>
           </div>
-        </form>
+        </div>
+      </header>
+
+      {/* Navigation Tabs */}
+      <nav className="dashboard-nav">
+        <div className="nav-tabs">
+          {/* Admin Tabs */}
+          {hasPermission('approve_users') && (
+            <button
+              className={activeTab === 'admin' ? 'active' : ''}
+              onClick={() => setActiveTab('admin')}
+            >
+              👥 User Management
+            </button>
+          )}
+          
+          {/* Supervisor Tabs */}
+          {hasPermission('view_reports') && (
+            <button
+              className={activeTab === 'reports' ? 'active' : ''}
+              onClick={() => setActiveTab('reports')}
+            >
+              📊 Reports
+            </button>
+          )}
+          
+          {/* Marshal Tabs */}
+          {marshalProfile?.role === 'Marshal' && (
+            <>
+              <button
+                className={activeTab === 'overview' ? 'active' : ''}
+                onClick={() => setActiveTab('overview')}
+              >
+                🏠 Overview
+              </button>
+              <button
+                className={activeTab === 'ranks' ? 'active' : ''}
+                onClick={() => setActiveTab('ranks')}
+              >
+                📍 Taxi Ranks
+              </button>
+              <button
+                className={activeTab === 'taxis' ? 'active' : ''}
+                onClick={() => setActiveTab('taxis')}
+              >
+                🚖 Taxis
+              </button>
+              <button
+                className={activeTab === 'loads' ? 'active' : ''}
+                onClick={() => setActiveTab('loads')}
+              >
+                📦 Loads
+              </button>
+              <button
+                className={activeTab === 'payments' ? 'active' : ''}
+                onClick={() => setActiveTab('payments')}
+              >
+                💰 Payments
+              </button>
+              <button
+                className={activeTab === 'meetings' ? 'active' : ''}
+                onClick={() => setActiveTab('meetings')}
+              >
+                📅 Meetings
+              </button>
+            </>
+          )}
+        </div>
+      </nav>
+
+      {/* Content Area */}
+      <div className="dashboard-content">
+        {/* Admin Panel */}
+        {activeTab === 'admin' && hasPermission('approve_users') && (
+          <AdminPanel
+            pendingUsers={pendingUsers}
+            approvedMarshals={approvedMarshals}
+            taxiRanks={taxiRanks}
+            onApproveUser={approveUser}
+            onRejectUser={rejectUser}
+            activityLogs={activityLogs}
+            createAdmin={createAdmin}
+            reloadTaxiRanks={loadTaxiRanks}
+            reloadApprovedMarshals={loadApprovedMarshals}
+          />
+        )}
+
+        {/* Reports Panel */}
+        {activeTab === 'reports' && hasPermission('view_reports') && (
+          <ReportsPanel
+            reports={reports}
+            loads={loads}
+            payments={payments}
+            taxis={taxis}
+            timeFilter={timeFilter}
+            setTimeFilter={setTimeFilter}
+          />
+        )}
+
+        {/* Marshal Panels */}
+        {marshalProfile?.role === 'Marshal' && (
+          <>
+            {activeTab === 'overview' && (
+              <OverviewPanel
+                stats={stats}
+                taxis={taxis}
+                selectedTaxi={selectedTaxi}
+                setSelectedTaxi={setSelectedTaxi}
+                onRecordLoad={recordLoad}
+                loading={loading}
+              />
+            )}
+
+            {activeTab === 'ranks' && (
+              <TaxiRanksPanel
+                taxiRanks={taxiRanks}
+                onAddRank={addTaxiRank}
+                showAddModal={showAddRankModal}
+                setShowAddModal={setShowAddRankModal}
+              />
+            )}
+
+            {activeTab === 'taxis' && (
+              <TaxisPanel
+                taxis={taxis}
+                onAddTaxi={addTaxi}
+                showAddModal={showAddTaxiModal}
+                setShowAddModal={setShowAddTaxiModal}
+                searchReg={searchReg}
+                setSearchReg={setSearchReg}
+                taxiRanks={taxiRanks}
+              />
+            )}
+
+            {activeTab === 'loads' && (
+              <LoadsPanel
+                loads={loads}
+                timeFilter={timeFilter}
+                setTimeFilter={setTimeFilter}
+              />
+            )}
+
+            {activeTab === 'payments' && (
+              <PaymentsPanel
+                payments={payments}
+                taxis={taxis}
+                onRecordPayment={recordPayment}
+                showPaymentModal={showPaymentModal}
+                setShowPaymentModal={setShowPaymentModal}
+              />
+            )}
+
+            {activeTab === 'meetings' && (
+              <MeetingsPanel
+                meetings={meetings}
+                onCreateMeeting={createMeeting}
+                showMeetingModal={showMeetingModal}
+                setShowMeetingModal={setShowMeetingModal}
+              />
+            )}
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-// ===================================
-// EDIT TAXI MODAL
-// ===================================
-function EditTaxiModal({ onClose, taxi, onSuccess }) {
-  const [formData, setFormData] = useState({
-    registration: taxi.registration || '',
-    driverName: taxi.driverName || '',
-    phoneNumber: taxi.phoneNumber || '',
-    paymentMonth: taxi.membershipPaidUntil ? taxi.membershipPaidUntil.toDate().getMonth() : new Date().getMonth(),
-    paymentYear: taxi.membershipPaidUntil ? taxi.membershipPaidUntil.toDate().getFullYear() : new Date().getFullYear()
-  });
-  const [loading, setLoading] = useState(false);
+// Admin Panel Component
+function AdminPanel({ pendingUsers, approvedMarshals, taxiRanks, onApproveUser, onRejectUser, activityLogs, createAdmin, reloadTaxiRanks, reloadApprovedMarshals }) {
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [assignedRole, setAssignedRole] = useState('');
+  const [assignedRank, setAssignedRank] = useState('');
+  const [showCreateAdminModal, setShowCreateAdminModal] = useState(false);
+  const [newAdminEmail, setNewAdminEmail] = useState('');
+  const [newAdminName, setNewAdminName] = useState('');
+  const [newAdminPhone, setNewAdminPhone] = useState('');
+  const [newAdminPassword, setNewAdminPassword] = useState('');
+  const [creatingAdmin, setCreatingAdmin] = useState(false);
+  
+  // Taxi Rank Management
+  const [showRankModal, setShowRankModal] = useState(false);
+  const [showEditRankModal, setShowEditRankModal] = useState(false);
+  const [showAssignRankModal, setShowAssignRankModal] = useState(false);
+  const [showManageRankModal, setShowManageRankModal] = useState(false);
+  const [newRankName, setNewRankName] = useState('');
+  const [newRankLocation, setNewRankLocation] = useState('');
+  const [newRankDescription, setNewRankDescription] = useState('');
+  const [newRankLatitude, setNewRankLatitude] = useState('');
+  const [newRankLongitude, setNewRankLongitude] = useState('');
+  const [newRankDestinations, setNewRankDestinations] = useState(['']);
+  const [selectedRankId, setSelectedRankId] = useState('');
+  const [selectedMarshalIds, setSelectedMarshalIds] = useState([]);
+  const [rankToManage, setRankToManage] = useState(null);
+  const [rankToEdit, setRankToEdit] = useState(null);
+  const [editRankName, setEditRankName] = useState('');
+  const [editRankLocation, setEditRankLocation] = useState('');
+  const [editRankDescription, setEditRankDescription] = useState('');
+  const [editRankLatitude, setEditRankLatitude] = useState('');
+  const [editRankLongitude, setEditRankLongitude] = useState('');
+  const [editRankDestinations, setEditRankDestinations] = useState(['']);
+  const [editRankAisles, setEditRankAisles] = useState([]);
+  const [editNumberOfAisles, setEditNumberOfAisles] = useState('');
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
+  // User Management
+  const [showEditUserModal, setShowEditUserModal] = useState(false);
+  const [showDeleteUserModal, setShowDeleteUserModal] = useState(false);
+  const [userToEdit, setUserToEdit] = useState(null);
+  const [userToDelete, setUserToDelete] = useState(null);
+  const [editUserName, setEditUserName] = useState('');
+  const [editUserEmail, setEditUserEmail] = useState('');
+  const [editUserPhone, setEditUserPhone] = useState('');
+  const [editUserRole, setEditUserRole] = useState('');
+  const [editUserRank, setEditUserRank] = useState('');
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [selectedUsers, setSelectedUsers] = useState([]);
+  const [bulkAction, setBulkAction] = useState('');
 
-    try {
-      const paidUntilDate = new Date(formData.paymentYear, formData.paymentMonth, 1);
-      const taxiRef = doc(db, 'taxis', taxi.id);
-
-      await updateDoc(taxiRef, {
-        registration: formData.registration.toUpperCase(),
-        driverName: formData.driverName,
-        phoneNumber: formData.phoneNumber,
-        membershipPaidUntil: Timestamp.fromDate(paidUntilDate),
-        updatedAt: Timestamp.now()
-      });
-
-      alert('✅ Taxi updated successfully!');
-      onSuccess();
-      onClose();
-    } catch (error) {
-      console.error('Error updating taxi:', error);
-      alert('❌ Failed to update taxi');
-    } finally {
-      setLoading(false);
+  const handleApproval = () => {
+    if (!selectedUser || !assignedRole) {
+      alert('Please select a user and assign a role');
+      return;
     }
+    
+    if (assignedRole === 'Marshal' && !assignedRank) {
+      alert('Please assign a taxi rank for Marshal role');
+      return;
+    }
+
+    onApproveUser(selectedUser.id, assignedRole, assignedRank);
+    setSelectedUser(null);
+    setAssignedRole('');
+    setAssignedRank('');
   };
 
-  const months = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December'
-  ];
+  const handleCreateRank = async () => {
+    if (!newRankName || !newRankLocation) {
+      alert('Please fill in rank name and address');
+      return;
+    }
 
-  const currentYear = new Date().getFullYear();
-  const years = [currentYear - 1, currentYear, currentYear + 1];
+    if (!newRankLatitude || !newRankLongitude) {
+      alert('Please enter GPS coordinates so users can find this rank');
+      return;
+    }
 
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-        <h2>Edit Taxi</h2>
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Registration Number *</label>
-            <input
-              type="text"
-              value={formData.registration}
-              onChange={(e) => setFormData({...formData, registration: e.target.value.toUpperCase()})}
-              placeholder="ABC123GP"
-              required
-            />
-          </div>
-
-          <div className="form-group">
-            <label>Driver Name *</label>
-            <input
-              type="text"
-              value={formData.driverName}
-              onChange={(e) => setFormData({...formData, driverName: e.target.value})}
-              placeholder="John Modise"
-              required
-            />
-          </div>
-
-          <div className="form-group">
-            <label>Phone Number</label>
-            <input
-              type="tel"
-              value={formData.phoneNumber}
-              onChange={(e) => setFormData({...formData, phoneNumber: e.target.value})}
-              placeholder="+27123456789"
-            />
-          </div>
-
-          <div className="membership-payment-section">
-            <h3>Update Membership</h3>
-            <p className="hint">Update the membership payment month</p>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label>Month *</label>
-                <select
-                  value={formData.paymentMonth}
-                  onChange={(e) => setFormData({...formData, paymentMonth: parseInt(e.target.value)})}
-                  className="select-input"
-                  required
-                >
-                  {months.map((month, index) => (
-                    <option key={index} value={index}>{month}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label>Year *</label>
-                <select
-                  value={formData.paymentYear}
-                  onChange={(e) => setFormData({...formData, paymentYear: parseInt(e.target.value)})}
-                  className="select-input"
-                  required
-                >
-                  {years.map(year => (
-                    <option key={year} value={year}>{year}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div className="modal-actions">
-            <button type="button" onClick={onClose} className="cancel-btn">
-              Cancel
-            </button>
-            <button type="submit" disabled={loading} className="submit-btn">
-              {loading ? '⏳ Updating...' : 'Update Taxi'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-// ===================================
-// ADD RANK MODAL
-// ===================================
-function AddRankModal({ onClose, onSuccess }) {
-  const [formData, setFormData] = useState({
-    name: '',
-    address: '',
-    lat: '',
-    lng: '',
-    destinations: '',
-    aisles: [{ number: 1, name: '', routes: '' }],
-    marshalEmail: '',
-    marshalPassword: 'TempPass123!',
-    supervisorEmail: '',
-    supervisorPassword: 'TempPass123!'
-  });
-  const [loading, setLoading] = useState(false);
-
-  const addAisle = () => {
-    setFormData({
-      ...formData,
-      aisles: [...formData.aisles, { number: formData.aisles.length + 1, name: '', routes: '' }]
-    });
-  };
-
-  const removeAisle = (index) => {
-    const newAisles = formData.aisles.filter((_, i) => i !== index);
-    // Renumber aisles
-    const renumberedAisles = newAisles.map((aisle, idx) => ({
-      ...aisle,
-      number: idx + 1
-    }));
-    setFormData({ ...formData, aisles: renumberedAisles });
-  };
-
-  const updateAisle = (index, field, value) => {
-    const newAisles = [...formData.aisles];
-    newAisles[index][field] = value;
-    setFormData({ ...formData, aisles: newAisles });
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
+    // Validate coordinates
+    const lat = parseFloat(newRankLatitude);
+    const lng = parseFloat(newRankLongitude);
+    
+    if (isNaN(lat) || isNaN(lng)) {
+      alert('Please enter valid coordinates (numbers only)');
+      return;
+    }
+    
+    if (lat < -90 || lat > 90) {
+      alert('Latitude must be between -90 and 90');
+      return;
+    }
+    
+    if (lng < -180 || lng > 180) {
+      alert('Longitude must be between -180 and 180');
+      return;
+    }
 
     try {
       const rankData = {
-        name: formData.name,
-        address: formData.address,
-        location: {
-          lat: parseFloat(formData.lat),
-          lng: parseFloat(formData.lng)
+        name: newRankName,
+        address: newRankLocation, // Store address as string
+        location: { // Store coordinates for maps
+          lat: lat,
+          lng: lng
         },
-        destinations: formData.destinations.split(',').map(d => d.trim()).filter(d => d),
-        aisles: formData.aisles.map(aisle => ({
-          number: aisle.number,
-          name: aisle.name,
-          routes: aisle.routes.split(',').map(r => r.trim()).filter(r => r)
-        })),
-        createdAt: Timestamp.now()
+        description: newRankDescription,
+        createdAt: Timestamp.now(),
+        assignedMarshals: [],
+        status: 'active',
+        destinations: [], // Initialize empty destinations array
+        aisles: [] // Initialize empty aisles array
       };
 
       await addDoc(collection(db, 'taxiRanks'), rankData);
 
-      alert('✅ Taxi rank added successfully!');
-      if (onSuccess) onSuccess();
-      onClose();
+      alert('✅ Taxi rank created successfully! It will now appear in the user app.');
+      setShowRankModal(false);
+      setNewRankName('');
+      setNewRankLocation('');
+      setNewRankDescription('');
+      setNewRankLatitude('');
+      setNewRankLongitude('');
+      
+      // Reload ranks using callback
+      if (reloadTaxiRanks) {
+        await reloadTaxiRanks();
+      }
     } catch (error) {
-      console.error('Error adding taxi rank:', error);
-      alert('❌ Failed to add taxi rank');
-    } finally {
-      setLoading(false);
+      console.error('Error creating rank:', error);
+      alert('Failed to create rank: ' + error.message);
+    }
+  };
+
+  const handleAssignMarshalsToRank = async () => {
+    if (!selectedRankId) {
+      alert('Please select a taxi rank');
+      return;
+    }
+
+    if (selectedMarshalIds.length === 0) {
+      alert('Please select at least one marshal or supervisor');
+      return;
+    }
+
+    try {
+      // Update the rank with assigned marshals
+      const rankRef = doc(db, 'taxiRanks', selectedRankId);
+      await updateDoc(rankRef, {
+        assignedMarshals: selectedMarshalIds,
+        updatedAt: Timestamp.now()
+      });
+
+      // Update each selected marshal's rank
+      // Get the rank name first
+      const rankSnapshot = await getDoc(rankRef);
+      const rankName = rankSnapshot.data()?.name;
+
+      for (const marshalId of selectedMarshalIds) {
+        const marshalRef = doc(db, 'marshalls', marshalId);
+        await updateDoc(marshalRef, {
+          rank: rankName, // Store rank name instead of ID for compatibility
+          updatedAt: Timestamp.now()
+        });
+      }
+
+      alert('✅ Marshals assigned to rank successfully!');
+      setShowAssignRankModal(false);
+      setSelectedRankId('');
+      setSelectedMarshalIds([]);
+      
+      // Reload data using callbacks
+      if (reloadTaxiRanks) {
+        await reloadTaxiRanks();
+      }
+      if (reloadApprovedMarshals) {
+        await reloadApprovedMarshals();
+      }
+    } catch (error) {
+      console.error('Error assigning marshals:', error);
+      alert('Failed to assign marshals: ' + error.message);
+    }
+  };
+
+  const toggleMarshalSelection = (marshalId) => {
+    setSelectedMarshalIds(prev => 
+      prev.includes(marshalId) 
+        ? prev.filter(id => id !== marshalId)
+        : [...prev, marshalId]
+    );
+  };
+
+  const handleDeleteRank = async (rankId) => {
+    if (!window.confirm('Are you sure you want to delete this taxi rank? Marshals assigned to it will need to be reassigned.')) {
+      return;
+    }
+
+    try {
+      await deleteDoc(doc(db, 'taxiRanks', rankId));
+      alert('✅ Taxi rank deleted successfully!');
+      
+      // Reload ranks using callback
+      if (reloadTaxiRanks) {
+        await reloadTaxiRanks();
+      }
+    } catch (error) {
+      console.error('Error deleting rank:', error);
+      alert('Failed to delete rank: ' + error.message);
+    }
+  };
+
+  const handleRemoveUserFromRank = async (userId, rankId, rankName) => {
+    if (!window.confirm('Remove this user from the rank?')) {
+      return;
+    }
+
+    try {
+      // Get the rank document
+      const rankRef = doc(db, 'taxiRanks', rankId);
+      const rankSnapshot = await getDoc(rankRef);
+      const currentAssignedMarshals = rankSnapshot.data()?.assignedMarshals || [];
+
+      // Remove user from rank's assignedMarshals array
+      const updatedMarshals = currentAssignedMarshals.filter(id => id !== userId);
+      await updateDoc(rankRef, {
+        assignedMarshals: updatedMarshals,
+        updatedAt: Timestamp.now()
+      });
+
+      // Clear the rank from user's profile
+      const userRef = doc(db, 'marshalls', userId);
+      await updateDoc(userRef, {
+        rank: null,
+        updatedAt: Timestamp.now()
+      });
+
+      alert('✅ User removed from rank successfully!');
+      
+      // Reload data
+      if (reloadTaxiRanks) {
+        await reloadTaxiRanks();
+      }
+      if (reloadApprovedMarshals) {
+        await reloadApprovedMarshals();
+      }
+    } catch (error) {
+      console.error('Error removing user from rank:', error);
+      alert('Failed to remove user: ' + error.message);
+    }
+  };
+
+  const handleOpenManageRank = (rank) => {
+    // Get currently assigned users for this rank
+    const assignedUsers = approvedMarshals.filter(m => 
+      rank.assignedMarshals?.includes(m.id) || m.rank === rank.name
+    );
+    
+    setRankToManage({
+      ...rank,
+      assignedUsers: assignedUsers
+    });
+    
+    // Pre-select currently assigned users
+    setSelectedMarshalIds(assignedUsers.map(u => u.id));
+    setShowManageRankModal(true);
+  };
+
+  const handleReassignUsers = async () => {
+    if (!rankToManage) return;
+
+    try {
+      // Get currently assigned user IDs
+      const currentlyAssigned = rankToManage.assignedUsers.map(u => u.id);
+      
+      // Find users to add and remove
+      const usersToAdd = selectedMarshalIds.filter(id => !currentlyAssigned.includes(id));
+      const usersToRemove = currentlyAssigned.filter(id => !selectedMarshalIds.includes(id));
+
+      // Update the rank document
+      const rankRef = doc(db, 'taxiRanks', rankToManage.id);
+      await updateDoc(rankRef, {
+        assignedMarshals: selectedMarshalIds,
+        updatedAt: Timestamp.now()
+      });
+
+      // Update users being added
+      for (const userId of usersToAdd) {
+        const userRef = doc(db, 'marshalls', userId);
+        await updateDoc(userRef, {
+          rank: rankToManage.name,
+          updatedAt: Timestamp.now()
+        });
+      }
+
+      // Update users being removed
+      for (const userId of usersToRemove) {
+        const userRef = doc(db, 'marshalls', userId);
+        await updateDoc(userRef, {
+          rank: null,
+          updatedAt: Timestamp.now()
+        });
+      }
+
+      alert(`✅ Rank assignments updated!\nAdded: ${usersToAdd.length}\nRemoved: ${usersToRemove.length}`);
+      setShowManageRankModal(false);
+      setRankToManage(null);
+      setSelectedMarshalIds([]);
+      
+      // Reload data
+      if (reloadTaxiRanks) {
+        await reloadTaxiRanks();
+      }
+      if (reloadApprovedMarshals) {
+        await reloadApprovedMarshals();
+      }
+    } catch (error) {
+      console.error('Error reassigning users:', error);
+      alert('Failed to update assignments: ' + error.message);
     }
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box large" onClick={(e) => e.stopPropagation()}>
-        <h2>Add New Taxi Rank</h2>
-        <form onSubmit={handleSubmit} className="rank-form">
-          <div className="form-group">
-            <label>Rank Name *</label>
-            <input
-              type="text"
-              value={formData.name}
-              onChange={(e) => setFormData({...formData, name: e.target.value})}
-              placeholder="Bree Taxi Rank"
-              required
-            />
-          </div>
-
-          <div className="form-group">
-            <label>Address *</label>
-            <input
-              type="text"
-              value={formData.address}
-              onChange={(e) => setFormData({...formData, address: e.target.value})}
-              placeholder="Bree Street, Johannesburg CBD"
-              required
-            />
-          </div>
-
-          <div className="form-row">
-            <div className="form-group">
-              <label>Latitude *</label>
-              <input
-                type="number"
-                step="any"
-                value={formData.lat}
-                onChange={(e) => setFormData({...formData, lat: e.target.value})}
-                placeholder="-26.2041"
-                required
-              />
-            </div>
-
-            <div className="form-group">
-              <label>Longitude *</label>
-              <input
-                type="number"
-                step="any"
-                value={formData.lng}
-                onChange={(e) => setFormData({...formData, lng: e.target.value})}
-                placeholder="28.0473"
-                required
-              />
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label>Destinations (comma separated) *</label>
-            <input
-              type="text"
-              value={formData.destinations}
-              onChange={(e) => setFormData({...formData, destinations: e.target.value})}
-              placeholder="Soweto, Alexandra, Sandton, Randburg"
-              required
-            />
-          </div>
-
-          <div className="aisles-section">
-            <div className="section-header">
-              <h3>Aisles & Routes</h3>
-              <button type="button" onClick={addAisle} className="add-aisle-btn">
-                + Add Aisle
-              </button>
-            </div>
-
-            {formData.aisles.map((aisle, index) => (
-              <div key={index} className="aisle-form">
-                <div className="aisle-header">
-                  <h4>Aisle {aisle.number}</h4>
-                  {formData.aisles.length > 1 && (
-                    <button type="button" onClick={() => removeAisle(index)} className="remove-btn">
-                      Remove
-                    </button>
-                  )}
+    <div className="admin-panel">
+      {/* Pending Users */}
+      <div className="admin-section">
+        <h2>📋 Pending User Approvals ({pendingUsers.length})</h2>
+        {pendingUsers.length > 0 ? (
+          <div className="users-grid">
+            {pendingUsers.map(user => (
+              <div key={user.id} className="user-card">
+                <div className="user-header">
+                  <h3>{user.name}</h3>
+                  <span className="user-date">
+                    {user.createdAt?.toDate().toLocaleDateString()}
+                  </span>
                 </div>
-
-                <div className="form-group">
-                  <label>Aisle Name *</label>
-                  <input
-                    type="text"
-                    value={aisle.name}
-                    onChange={(e) => updateAisle(index, 'name', e.target.value)}
-                    placeholder="Soweto Line"
-                    required
-                  />
+                <div className="user-details">
+                  <p>📧 {user.email}</p>
+                  <p>📱 {user.phone}</p>
                 </div>
-
-                <div className="form-group">
-                  <label>Routes (comma separated) *</label>
-                  <input
-                    type="text"
-                    value={aisle.routes}
-                    onChange={(e) => updateAisle(index, 'routes', e.target.value)}
-                    placeholder="Orlando, Diepkloof, Meadowlands"
-                    required
-                  />
+                <div className="user-actions">
+                  <button
+                    className="approve-btn"
+                    onClick={() => setSelectedUser(user)}
+                  >
+                    Assign Role
+                  </button>
+                  <button
+                    className="reject-btn"
+                    onClick={() => onRejectUser(user.id)}
+                  >
+                    Reject
+                  </button>
                 </div>
               </div>
             ))}
           </div>
+        ) : (
+          <div className="empty-state">
+            <p>No pending approvals</p>
+          </div>
+        )}
+      </div>
 
-          <div className="modal-actions">
-            <button type="button" onClick={onClose} className="cancel-btn">
-              Cancel
+      {/* Role Assignment Modal */}
+      {selectedUser && (
+        <div className="modal-overlay" onClick={() => setSelectedUser(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>Assign Role to {selectedUser.name}</h3>
+            
+            <div className="form-group">
+              <label>Select Role *</label>
+              <select
+                value={assignedRole}
+                onChange={(e) => setAssignedRole(e.target.value)}
+              >
+                <option value="">-- Select Role --</option>
+                <option value="Admin">Admin - Full system access</option>
+                <option value="Supervisor">Supervisor - View reports only</option>
+                <option value="Marshal">Marshal - Manage taxi operations</option>
+              </select>
+            </div>
+
+            {assignedRole === 'Marshal' && (
+              <div className="form-group">
+                <label>Assign Taxi Rank *</label>
+                <select
+                  value={assignedRank}
+                  onChange={(e) => setAssignedRank(e.target.value)}
+                >
+                  <option value="">-- Select Taxi Rank --</option>
+                  {taxiRanks.map(rank => (
+                    <option key={rank.id} value={rank.name}>
+                      {rank.name} - {rank.address || (typeof rank.location === 'string' ? rank.location : 'Location not set')}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="modal-actions">
+              <button className="primary-btn" onClick={handleApproval}>
+                Approve & Assign
+              </button>
+              <button className="secondary-btn" onClick={() => setSelectedUser(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Account Creation */}
+      <div className="admin-section">
+        <div className="section-header">
+          <h2>👑 Admin Account Management</h2>
+          <button
+            className="create-admin-btn"
+            onClick={() => setShowCreateAdminModal(true)}
+          >
+            ➕ Create New Admin
+          </button>
+        </div>
+        <div className="info-box" style={{ marginBottom: '20px', padding: '12px', backgroundColor: '#e3f2fd', borderRadius: '8px', fontSize: '0.875rem' }}>
+          <strong>Admin Creation:</strong> Only existing administrators can create new admin accounts. This ensures secure admin role management.
+        </div>
+      </div>
+
+      {/* Create Admin Modal */}
+      {showCreateAdminModal && (
+        <div className="modal-overlay" onClick={() => setShowCreateAdminModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>Create New Admin Account</h3>
+
+            <div className="form-group">
+              <label>Full Name *</label>
+              <input
+                type="text"
+                value={newAdminName}
+                onChange={(e) => setNewAdminName(e.target.value)}
+                placeholder="e.g., John Smith"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Email Address *</label>
+              <input
+                type="email"
+                value={newAdminEmail}
+                onChange={(e) => setNewAdminEmail(e.target.value)}
+                placeholder="admin@taxihub.com"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Phone Number *</label>
+              <input
+                type="tel"
+                value={newAdminPhone}
+                onChange={(e) => setNewAdminPhone(e.target.value)}
+                placeholder="+27 12 345 6789"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Password *</label>
+              <input
+                type="password"
+                value={newAdminPassword}
+                onChange={(e) => setNewAdminPassword(e.target.value)}
+                placeholder="••••••••"
+                minLength={6}
+                required
+              />
+            </div>
+
+            <div className="info-box" style={{ marginBottom: '20px', padding: '12px', backgroundColor: '#fef3c7', borderRadius: '8px', fontSize: '0.875rem' }}>
+              <strong>Note:</strong> New admin accounts are automatically approved and have full system access. They can create additional admin accounts.
+            </div>
+
+            <div className="modal-actions">
+              <button
+                className="primary-btn"
+                onClick={async () => {
+                  if (!newAdminName || !newAdminEmail || !newAdminPhone || !newAdminPassword) {
+                    alert('Please fill in all required fields');
+                    return;
+                  }
+
+                  setCreatingAdmin(true);
+                  try {
+                    await onCreateAdmin({
+                      name: newAdminName,
+                      email: newAdminEmail,
+                      phone: newAdminPhone,
+                      password: newAdminPassword
+                    });
+
+                    setNewAdminName('');
+                    setNewAdminEmail('');
+                    setNewAdminPhone('');
+                    setNewAdminPassword('');
+                    setShowCreateAdminModal(false);
+                  } catch (error) {
+                    // Error handling is done in createAdmin function
+                  } finally {
+                    setCreatingAdmin(false);
+                  }
+                }}
+                disabled={creatingAdmin}
+              >
+                {creatingAdmin ? 'Creating...' : 'Create Admin Account'}
+              </button>
+              <button
+                className="secondary-btn"
+                onClick={() => setShowCreateAdminModal(false)}
+                disabled={creatingAdmin}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Taxi Rank Management */}
+      <div className="admin-section">
+        <div className="section-header">
+          <h2>🚕 Taxi Rank Management</h2>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button
+              className="create-admin-btn"
+              onClick={() => setShowRankModal(true)}
+            >
+              ➕ Create New Rank
             </button>
-            <button type="submit" disabled={loading} className="submit-btn">
-              {loading ? '⏳ Adding...' : 'Add Rank'}
+            <button
+              className="create-admin-btn"
+              onClick={() => setShowAssignRankModal(true)}
+              style={{ backgroundColor: '#4CAF50' }}
+            >
+              👥 Assign Users to Rank
             </button>
           </div>
-        </form>
+        </div>
+
+        {taxiRanks.length > 0 ? (
+          <div className="table-container">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Rank Name</th>
+                  <th>Address</th>
+                  <th>Coordinates</th>
+                  <th>Assigned Users</th>
+                  <th>Created</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {taxiRanks.map(rank => {
+                  const assignedUsers = approvedMarshals.filter(m => 
+                    rank.assignedMarshals?.includes(m.id) || m.rank === rank.name
+                  );
+                  return (
+                    <tr key={rank.id}>
+                      <td><strong>{rank.name}</strong></td>
+                      <td>
+                        {rank.address || (typeof rank.location === 'string' ? rank.location : '-')}
+                        {rank.description && (
+                          <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '4px' }}>
+                            {rank.description}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        {rank.location?.lat && rank.location?.lng ? (
+                          <div style={{ fontSize: '0.75rem' }}>
+                            <div>📍 {rank.location.lat.toFixed(4)}, {rank.location.lng.toFixed(4)}</div>
+                            <a 
+                              href={`https://www.google.com/maps?q=${rank.location.lat},${rank.location.lng}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{ color: '#2196F3', textDecoration: 'none', fontSize: '0.7rem' }}
+                            >
+                              View on Map →
+                            </a>
+                          </div>
+                        ) : (
+                          <span style={{ color: '#ff9800', fontSize: '0.75rem' }}>⚠️ No coordinates</span>
+                        )}
+                      </td>
+                      <td>
+                        {assignedUsers.length > 0 ? (
+                          <div style={{ fontSize: '0.875rem' }}>
+                            {assignedUsers.map(user => (
+                              <div key={user.id} style={{ 
+                                marginBottom: '8px', 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                justifyContent: 'space-between',
+                                padding: '4px 8px',
+                                backgroundColor: '#f5f5f5',
+                                borderRadius: '4px'
+                              }}>
+                                <div>
+                                  <span className={`role-badge role-${user.role?.toLowerCase()}`}>
+                                    {user.role}
+                                  </span> {user.name}
+                                </div>
+                                <button
+                                  onClick={() => handleRemoveUserFromRank(user.id, rank.id, rank.name)}
+                                  style={{
+                                    backgroundColor: '#ff5252',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: '4px',
+                                    padding: '2px 8px',
+                                    fontSize: '0.7rem',
+                                    cursor: 'pointer',
+                                    marginLeft: '8px'
+                                  }}
+                                  title="Remove from rank"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <span style={{ color: '#999' }}>No users assigned</span>
+                        )}
+                      </td>
+                      <td>{rank.createdAt?.toDate().toLocaleDateString()}</td>
+                      <td>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                          <button
+                            className="approve-btn"
+                            onClick={() => handleOpenManageRank(rank)}
+                            style={{ fontSize: '0.75rem', padding: '4px 8px', backgroundColor: '#2196F3' }}
+                          >
+                            👥 Manage Users
+                          </button>
+                          <button
+                            className="reject-btn"
+                            onClick={() => handleDeleteRank(rank.id)}
+                            style={{ fontSize: '0.75rem', padding: '4px 8px' }}
+                          >
+                            🗑️ Delete Rank
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="empty-state">
+            <p>No taxi ranks created yet. Create one to get started!</p>
+          </div>
+        )}
       </div>
+
+      {/* Create Rank Modal */}
+      {showRankModal && (
+        <div className="modal-overlay" onClick={() => setShowRankModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>Create New Taxi Rank</h3>
+
+            <div className="form-group">
+              <label>Rank Name *</label>
+              <input
+                type="text"
+                value={newRankName}
+                onChange={(e) => setNewRankName(e.target.value)}
+                placeholder="e.g., Central Station Rank"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Location / Address *</label>
+              <input
+                type="text"
+                value={newRankLocation}
+                onChange={(e) => setNewRankLocation(e.target.value)}
+                placeholder="e.g., Main Street, Cape Town"
+                required
+              />
+              <small style={{ fontSize: '0.75rem', color: '#666', display: 'block', marginTop: '4px' }}>
+                Enter the physical address of the taxi rank
+              </small>
+            </div>
+
+            <div style={{ 
+              border: '1px solid #e0e0e0', 
+              borderRadius: '8px', 
+              padding: '15px', 
+              backgroundColor: '#f9f9f9',
+              marginBottom: '15px'
+            }}>
+              <label style={{ fontWeight: 'bold', marginBottom: '10px', display: 'block' }}>
+                📍 GPS Coordinates (Required for User App)
+              </label>
+              <p style={{ fontSize: '0.75rem', color: '#666', marginBottom: '10px' }}>
+                Add coordinates so users can find this rank and get directions
+              </p>
+              
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                <div className="form-group" style={{ marginBottom: '0' }}>
+                  <label>Latitude *</label>
+                  <input
+                    type="text"
+                    value={newRankLatitude}
+                    onChange={(e) => setNewRankLatitude(e.target.value)}
+                    placeholder="-33.9249"
+                    required
+                  />
+                </div>
+                <div className="form-group" style={{ marginBottom: '0' }}>
+                  <label>Longitude *</label>
+                  <input
+                    type="text"
+                    value={newRankLongitude}
+                    onChange={(e) => setNewRankLongitude(e.target.value)}
+                    placeholder="18.4241"
+                    required
+                  />
+                </div>
+              </div>
+              
+              <button 
+                type="button"
+                onClick={() => {
+                  if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                      (position) => {
+                        setNewRankLatitude(position.coords.latitude.toString());
+                        setNewRankLongitude(position.coords.longitude.toString());
+                        alert('✅ Current location captured!');
+                      },
+                      (error) => {
+                        alert('Unable to get location. Please enter coordinates manually.');
+                      }
+                    );
+                  } else {
+                    alert('Geolocation is not supported by your browser');
+                  }
+                }}
+                style={{
+                  marginTop: '10px',
+                  padding: '8px 12px',
+                  fontSize: '0.875rem',
+                  backgroundColor: '#4CAF50',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer'
+                }}
+              >
+                📍 Use My Current Location
+              </button>
+              
+              <p style={{ fontSize: '0.7rem', color: '#999', marginTop: '8px' }}>
+                Tip: You can find coordinates on Google Maps by right-clicking a location
+              </p>
+            </div>
+
+            <div className="form-group">
+              <label>Description (Optional)</label>
+              <textarea
+                value={newRankDescription}
+                onChange={(e) => setNewRankDescription(e.target.value)}
+                placeholder="Additional details about this rank..."
+                rows="3"
+              />
+            </div>
+
+            <div className="modal-actions">
+              <button className="primary-btn" onClick={handleCreateRank}>
+                Create Rank
+              </button>
+              <button className="secondary-btn" onClick={() => setShowRankModal(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Assign Marshals to Rank Modal */}
+      {showAssignRankModal && (
+        <div className="modal-overlay" onClick={() => setShowAssignRankModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
+            <h3>Assign Users to Taxi Rank</h3>
+            <p style={{ fontSize: '0.875rem', color: '#666', marginBottom: '20px' }}>
+              Select a rank and then choose one or more marshals/supervisors to assign to it.
+            </p>
+
+            <div className="form-group">
+              <label>Select Taxi Rank *</label>
+              <select
+                value={selectedRankId}
+                onChange={(e) => setSelectedRankId(e.target.value)}
+                required
+              >
+                <option value="">-- Select Rank --</option>
+                {taxiRanks.map(rank => (
+                  <option key={rank.id} value={rank.id}>
+                    {rank.name} - {rank.address || (typeof rank.location === 'string' ? rank.location : 'Location not set')}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {selectedRankId && (
+              <div className="form-group">
+                <label>Select Users (Marshals & Supervisors) *</label>
+                <div style={{ 
+                  maxHeight: '300px', 
+                  overflowY: 'auto', 
+                  border: '1px solid #ddd', 
+                  borderRadius: '8px', 
+                  padding: '10px' 
+                }}>
+                  {approvedMarshals
+                    .filter(m => m.role === 'Marshal' || m.role === 'Supervisor')
+                    .map(marshal => (
+                      <label 
+                        key={marshal.id} 
+                        style={{ 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          padding: '8px', 
+                          cursor: 'pointer',
+                          borderBottom: '1px solid #f0f0f0'
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedMarshalIds.includes(marshal.id)}
+                          onChange={() => toggleMarshalSelection(marshal.id)}
+                          style={{ marginRight: '10px' }}
+                        />
+                        <div style={{ flex: 1 }}>
+                          <span className={`role-badge role-${marshal.role?.toLowerCase()}`}>
+                            {marshal.role}
+                          </span>
+                          <strong> {marshal.name}</strong>
+                          <div style={{ fontSize: '0.75rem', color: '#666' }}>
+                            {marshal.email} {marshal.rank && `• Current: ${marshal.rank}`}
+                          </div>
+                        </div>
+                      </label>
+                    ))}
+                  
+                  {approvedMarshals.filter(m => m.role === 'Marshal' || m.role === 'Supervisor').length === 0 && (
+                    <p style={{ textAlign: 'center', color: '#999', padding: '20px' }}>
+                      No marshals or supervisors available
+                    </p>
+                  )}
+                </div>
+                
+                {selectedMarshalIds.length > 0 && (
+                  <p style={{ marginTop: '10px', fontSize: '0.875rem', color: '#4CAF50' }}>
+                    ✓ {selectedMarshalIds.length} user(s) selected
+                  </p>
+                )}
+              </div>
+            )}
+
+            <div className="modal-actions">
+              <button 
+                className="primary-btn" 
+                onClick={handleAssignMarshalsToRank}
+                disabled={!selectedRankId || selectedMarshalIds.length === 0}
+              >
+                Assign to Rank
+              </button>
+              <button className="secondary-btn" onClick={() => {
+                setShowAssignRankModal(false);
+                setSelectedRankId('');
+                setSelectedMarshalIds([]);
+              }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manage Rank Users Modal */}
+      {showManageRankModal && rankToManage && (
+        <div className="modal-overlay" onClick={() => {
+          setShowManageRankModal(false);
+          setRankToManage(null);
+          setSelectedMarshalIds([]);
+        }}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
+            <h3>Manage Users for "{rankToManage.name}"</h3>
+            <p style={{ fontSize: '0.875rem', color: '#666', marginBottom: '20px' }}>
+              Select or deselect users to assign or remove them from this rank. 
+              Changes will be saved when you click "Update Assignments".
+            </p>
+
+            <div className="form-group">
+              <label>Current & Available Users</label>
+              <div style={{ 
+                maxHeight: '400px', 
+                overflowY: 'auto', 
+                border: '1px solid #ddd', 
+                borderRadius: '8px', 
+                padding: '10px' 
+              }}>
+                {approvedMarshals
+                  .filter(m => m.role === 'Marshal' || m.role === 'Supervisor')
+                  .map(marshal => {
+                    const isCurrentlyAssigned = rankToManage.assignedUsers.some(u => u.id === marshal.id);
+                    const isSelected = selectedMarshalIds.includes(marshal.id);
+                    
+                    return (
+                      <label 
+                        key={marshal.id} 
+                        style={{ 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          padding: '8px', 
+                          cursor: 'pointer',
+                          borderBottom: '1px solid #f0f0f0',
+                          backgroundColor: isCurrentlyAssigned ? '#e8f5e9' : 'transparent'
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleMarshalSelection(marshal.id)}
+                          style={{ marginRight: '10px' }}
+                        />
+                        <div style={{ flex: 1 }}>
+                          <span className={`role-badge role-${marshal.role?.toLowerCase()}`}>
+                            {marshal.role}
+                          </span>
+                          <strong> {marshal.name}</strong>
+                          {isCurrentlyAssigned && (
+                            <span style={{ 
+                              marginLeft: '8px', 
+                              fontSize: '0.7rem', 
+                              color: '#4CAF50',
+                              fontWeight: 'bold'
+                            }}>
+                              ✓ Currently Assigned
+                            </span>
+                          )}
+                          <div style={{ fontSize: '0.75rem', color: '#666' }}>
+                            {marshal.email}
+                            {marshal.rank && marshal.rank !== rankToManage.name && (
+                              <span style={{ color: '#ff9800', marginLeft: '8px' }}>
+                                • Currently at: {marshal.rank}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                
+                {approvedMarshals.filter(m => m.role === 'Marshal' || m.role === 'Supervisor').length === 0 && (
+                  <p style={{ textAlign: 'center', color: '#999', padding: '20px' }}>
+                    No marshals or supervisors available
+                  </p>
+                )}
+              </div>
+              
+              <div style={{ marginTop: '15px', padding: '10px', backgroundColor: '#f5f5f5', borderRadius: '6px' }}>
+                <strong>Summary:</strong>
+                <div style={{ fontSize: '0.875rem', marginTop: '8px' }}>
+                  <div>• Currently assigned: {rankToManage.assignedUsers.length} user(s)</div>
+                  <div>• Will be assigned: {selectedMarshalIds.length} user(s)</div>
+                  {selectedMarshalIds.length !== rankToManage.assignedUsers.length && (
+                    <div style={{ color: '#2196F3', marginTop: '4px' }}>
+                      → Changes detected: Click "Update Assignments" to save
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button 
+                className="primary-btn" 
+                onClick={handleReassignUsers}
+              >
+                💾 Update Assignments
+              </button>
+              <button className="secondary-btn" onClick={() => {
+                setShowManageRankModal(false);
+                setRankToManage(null);
+                setSelectedMarshalIds([]);
+              }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Approved Marshals */}
+      <div className="admin-section">
+        <h2>✅ Approved Users ({approvedMarshals.length})</h2>
+        <div className="table-container">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Phone</th>
+                <th>Role</th>
+                <th>Rank</th>
+                <th>Status</th>
+                <th>Last Login</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {approvedMarshals.map(marshal => (
+                <tr key={marshal.id} className={marshal.suspended ? 'suspended-user' : ''}>
+                  <td>{marshal.name}</td>
+                  <td>{marshal.email}</td>
+                  <td>{marshal.phone || '-'}</td>
+                  <td>
+                    <span className={`role-badge role-${marshal.role?.toLowerCase()}`}>
+                      {marshal.role}
+                    </span>
+                  </td>
+                  <td>{marshal.rank || '-'}</td>
+                  <td>
+                    <span className={`status-badge ${marshal.suspended ? 'suspended' : 'active'}`}>
+                      {marshal.suspended ? 'Suspended' : 'Active'}
+                    </span>
+                  </td>
+                  <td>
+                    {marshal.lastLogin?.toDate().toLocaleDateString() || 'Never'}
+                  </td>
+                  <td>
+                    <div className="action-buttons">
+                      <button
+                        className="action-btn edit-btn"
+                        onClick={() => {
+                          setUserToEdit(marshal);
+                          setEditUserName(marshal.name);
+                          setEditUserEmail(marshal.email);
+                          setEditUserPhone(marshal.phone || '');
+                          setEditUserRole(marshal.role);
+                          setEditUserRank(marshal.rank || '');
+                          setShowEditUserModal(true);
+                        }}
+                        title="Edit User"
+                      >
+                        ✏️ Edit
+                      </button>
+                      <button
+                        className={`action-btn ${marshal.suspended ? 'unsuspend-btn' : 'suspend-btn'}`}
+                        onClick={() => toggleUserSuspension(marshal.id, marshal.suspended)}
+                        title={marshal.suspended ? 'Unsuspend User' : 'Suspend User'}
+                      >
+                        {marshal.suspended ? '🔓 Unsuspend' : '🚫 Suspend'}
+                      </button>
+                      <button
+                        className="action-btn delete-btn"
+                        onClick={() => {
+                          setUserToDelete(marshal);
+                          setDeleteConfirmation('');
+                          setShowDeleteUserModal(true);
+                        }}
+                        title="Delete User"
+                      >
+                        🗑️ Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Edit User Modal */}
+      {showEditUserModal && userToEdit && (
+        <div className="modal-overlay" onClick={() => setShowEditUserModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>Edit User: {userToEdit.name}</h3>
+
+            <div className="form-group">
+              <label>Full Name *</label>
+              <input
+                type="text"
+                value={editUserName}
+                onChange={(e) => setEditUserName(e.target.value)}
+                placeholder="John Doe"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Email Address *</label>
+              <input
+                type="email"
+                value={editUserEmail}
+                onChange={(e) => setEditUserEmail(e.target.value)}
+                placeholder="user@taxihub.com"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Phone Number</label>
+              <input
+                type="tel"
+                value={editUserPhone}
+                onChange={(e) => setEditUserPhone(e.target.value)}
+                placeholder="+27 12 345 6789"
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Role *</label>
+              <select
+                value={editUserRole}
+                onChange={(e) => setEditUserRole(e.target.value)}
+                required
+              >
+                <option value="">-- Select Role --</option>
+                <option value="Admin">Admin - Full system access</option>
+                <option value="Supervisor">Supervisor - View reports only</option>
+                <option value="Marshal">Marshal - Manage taxi operations</option>
+              </select>
+            </div>
+
+            {editUserRole === 'Marshal' && (
+              <div className="form-group">
+                <label>Assigned Taxi Rank</label>
+                <select
+                  value={editUserRank}
+                  onChange={(e) => setEditUserRank(e.target.value)}
+                >
+                  <option value="">-- No rank assigned --</option>
+                  {taxiRanks.map(rank => (
+                    <option key={rank.id} value={rank.name}>
+                      {rank.name} - {rank.address || (typeof rank.location === 'string' ? rank.location : 'Location not set')}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="modal-actions">
+              <button
+                className="primary-btn"
+                onClick={() => {
+                  if (!editUserName || !editUserEmail || !editUserRole) {
+                    alert('Please fill in all required fields');
+                    return;
+                  }
+
+                  if (editUserRole === 'Marshal' && !editUserRank) {
+                    alert('Please assign a taxi rank for Marshal role');
+                    return;
+                  }
+
+                  editUser(userToEdit.id, {
+                    name: editUserName,
+                    email: editUserEmail,
+                    phone: editUserPhone,
+                    role: editUserRole,
+                    rank: editUserRole === 'Marshal' ? editUserRank : null
+                  });
+
+                  setShowEditUserModal(false);
+                  setUserToEdit(null);
+                }}
+              >
+                💾 Save Changes
+              </button>
+              <button
+                className="secondary-btn"
+                onClick={() => setShowEditUserModal(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete User Confirmation Modal */}
+      {showDeleteUserModal && userToDelete && (
+        <div className="modal-overlay" onClick={() => setShowDeleteUserModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>⚠️ DANGER ZONE ⚠️</h3>
+            <p style={{ color: '#dc2626', fontWeight: 'bold', marginBottom: '20px' }}>
+              You are about to permanently delete user: <strong>{userToDelete.name}</strong> ({userToDelete.email})
+            </p>
+
+            <div style={{ backgroundColor: '#fef2f2', padding: '15px', borderRadius: '8px', marginBottom: '20px' }}>
+              <strong>This action cannot be undone and will:</strong>
+              <ul style={{ marginTop: '10px', marginLeft: '20px' }}>
+                <li>Delete all user data permanently</li>
+                <li>Remove user from all assigned ranks</li>
+                <li>Delete login history and activity logs</li>
+                <li>Prevent user from accessing the system</li>
+              </ul>
+            </div>
+
+            <div className="form-group">
+              <label style={{ color: '#dc2626', fontWeight: 'bold' }}>
+                Type "YES" to confirm deletion:
+              </label>
+              <input
+                type="text"
+                value={deleteConfirmation}
+                onChange={(e) => setDeleteConfirmation(e.target.value)}
+                placeholder="Type YES to confirm"
+                style={{ borderColor: '#dc2626' }}
+              />
+            </div>
+
+            <div className="modal-actions">
+              <button
+                className="primary-btn"
+                style={{ backgroundColor: '#dc2626', borderColor: '#dc2626' }}
+                onClick={() => {
+                  if (deleteConfirmation !== 'YES') {
+                    alert('Please type "YES" to confirm deletion');
+                    return;
+                  }
+
+                  deleteUser(userToDelete.id, userToDelete.email);
+                  setShowDeleteUserModal(false);
+                  setUserToDelete(null);
+                  setDeleteConfirmation('');
+                }}
+                disabled={deleteConfirmation !== 'YES'}
+              >
+                🗑️ Permanently Delete User
+              </button>
+              <button
+                className="secondary-btn"
+                onClick={() => {
+                  setShowDeleteUserModal(false);
+                  setUserToDelete(null);
+                  setDeleteConfirmation('');
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Activity Logs */}
+      <div className="admin-section">
+        <h2>📜 Recent Activity</h2>
+        <div className="activity-logs">
+          {activityLogs.slice(0, 10).map(log => (
+            <div key={log.id} className="log-item">
+              <span className="log-action">{log.action}</span>
+              <span className="log-user">{log.performedBy || log.email}</span>
+              <span className="log-time">
+                {log.timestamp?.toDate().toLocaleString()}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Reports Panel Component
+function ReportsPanel({ reports, loads, payments, taxis, timeFilter, setTimeFilter }) {
+  return (
+    <div className="reports-panel">
+      <div className="reports-header">
+        <h2>📊 System Reports</h2>
+        <div className="time-filter">
+          <select value={timeFilter} onChange={(e) => setTimeFilter(e.target.value)}>
+            <option value="today">Today</option>
+            <option value="week">This Week</option>
+            <option value="month">This Month</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="reports-grid">
+        <div className="report-card">
+          <h3>📦 Daily Loads</h3>
+          <div className="report-value">{reports.dailyLoads || 0}</div>
+          <p className="report-label">Loads Today</p>
+        </div>
+
+        <div className="report-card">
+          <h3>💰 Weekly Revenue</h3>
+          <div className="report-value">R{(reports.weeklyRevenue || 0).toFixed(2)}</div>
+          <p className="report-label">Past 7 Days</p>
+        </div>
+
+        <div className="report-card">
+          <h3>👥 Active Marshals</h3>
+          <div className="report-value">{reports.activeMarshals || 0}</div>
+          <p className="report-label">Last 24 Hours</p>
+        </div>
+
+        <div className="report-card">
+          <h3>🚖 Total Taxis</h3>
+          <div className="report-value">{reports.totalTaxis || 0}</div>
+          <p className="report-label">Registered</p>
+        </div>
+      </div>
+
+      {/* Detailed Reports Section */}
+      <div className="detailed-reports">
+        <h3>📈 Detailed Analytics</h3>
+        
+        <div className="report-section">
+          <h4>Load Distribution by Time</h4>
+          <div className="chart-placeholder">
+            {/* Chart would go here */}
+            <p>Load distribution chart visualization</p>
+          </div>
+        </div>
+
+        <div className="report-section">
+          <h4>Revenue Trends</h4>
+          <div className="chart-placeholder">
+            {/* Chart would go here */}
+            <p>Revenue trends visualization</p>
+          </div>
+        </div>
+
+        <div className="report-section">
+          <h4>Top Performing Taxis</h4>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Registration</th>
+                <th>Driver</th>
+                <th>Total Loads</th>
+                <th>Revenue</th>
+              </tr>
+            </thead>
+            <tbody>
+              {taxis.slice(0, 5).map(taxi => (
+                <tr key={taxi.id}>
+                  <td>{taxi.registration}</td>
+                  <td>{taxi.driverName}</td>
+                  <td>{taxi.totalLoads || 0}</td>
+                  <td>R{(taxi.revenue || 0).toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Overview Panel Component
+function OverviewPanel({ stats, taxis, selectedTaxi, setSelectedTaxi, onRecordLoad, loading }) {
+  return (
+    <div className="overview-panel">
+      <h2>📊 Today's Overview</h2>
+      
+      <div className="stats-grid">
+        <div className="stat-card">
+          <div className="stat-icon">📦</div>
+          <div className="stat-content">
+            <h3>Today's Loads</h3>
+            <p className="stat-value">{stats.today}</p>
+          </div>
+        </div>
+
+        <div className="stat-card">
+          <div className="stat-icon">📅</div>
+          <div className="stat-content">
+            <h3>Week Total</h3>
+            <p className="stat-value">{stats.week}</p>
+          </div>
+        </div>
+
+        <div className="stat-card">
+          <div className="stat-icon">💰</div>
+          <div className="stat-content">
+            <h3>Revenue</h3>
+            <p className="stat-value">R{stats.totalRevenue.toFixed(2)}</p>
+          </div>
+        </div>
+
+        <div className="stat-card">
+          <div className="stat-icon">✅</div>
+          <div className="stat-content">
+            <h3>Paid Today</h3>
+            <p className="stat-value">{stats.paidToday}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Quick Load Recording */}
+      <div className="quick-record">
+        <h3>📝 Record Load</h3>
+        <div className="record-form">
+          <select
+            value={selectedTaxi}
+            onChange={(e) => setSelectedTaxi(e.target.value)}
+            className="taxi-select"
+          >
+            <option value="">Select Taxi</option>
+            {taxis.map(taxi => (
+              <option key={taxi.id} value={taxi.id}>
+                {taxi.registration} - {taxi.driverName}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={onRecordLoad}
+            disabled={loading || !selectedTaxi}
+            className="record-btn"
+          >
+            {loading ? 'Recording...' : 'Record Load'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// TaxiRanksPanel Component
+function TaxiRanksPanel({ taxiRanks, onAddRank, showAddModal, setShowAddModal }) {
+  const [newRankName, setNewRankName] = useState('');
+  const [newRankLocation, setNewRankLocation] = useState('');
+  const [newRankCapacity, setNewRankCapacity] = useState('');
+  const [newRankDescription, setNewRankDescription] = useState('');
+  const [newRankLatitude, setNewRankLatitude] = useState('');
+  const [newRankLongitude, setNewRankLongitude] = useState('');
+  const [numberOfAisles, setNumberOfAisles] = useState('');
+  const [aisles, setAisles] = useState([]);
+
+  const handleAisleCountChange = (count) => {
+    setNumberOfAisles(count);
+    const aisleCount = parseInt(count) || 0;
+    const newAisles = [];
+    for (let i = 1; i <= aisleCount; i++) {
+      newAisles.push({
+        aisleNumber: i,
+        name: `Aisle ${i}`,
+        capacity: 0,
+        assignedTaxis: []
+      });
+    }
+    setAisles(newAisles);
+  };
+
+  const updateAisleName = (index, name) => {
+    const updated = [...aisles];
+    updated[index].name = name;
+    setAisles(updated);
+  };
+
+  const updateAisleCapacity = (index, capacity) => {
+    const updated = [...aisles];
+    updated[index].capacity = parseInt(capacity) || 0;
+    setAisles(updated);
+  };
+
+  const handleAddRank = () => {
+    if (!newRankName || !newRankLocation) {
+      alert('Please fill in rank name and address');
+      return;
+    }
+
+    if (!newRankLatitude || !newRankLongitude) {
+      alert('Please enter GPS coordinates so users can find this rank');
+      return;
+    }
+
+    // Validate coordinates
+    const lat = parseFloat(newRankLatitude);
+    const lng = parseFloat(newRankLongitude);
+    
+    if (isNaN(lat) || isNaN(lng)) {
+      alert('Please enter valid coordinates (numbers only)');
+      return;
+    }
+    
+    if (lat < -90 || lat > 90) {
+      alert('Latitude must be between -90 and 90');
+      return;
+    }
+    
+    if (lng < -180 || lng > 180) {
+      alert('Longitude must be between -180 and 180');
+      return;
+    }
+
+    onAddRank({
+      name: newRankName,
+      address: newRankLocation,
+      location: {
+        lat: lat,
+        lng: lng
+      },
+      description: newRankDescription,
+      capacity: parseInt(newRankCapacity) || 0,
+      aisles: aisles.length > 0 ? aisles : [],
+      numberOfAisles: aisles.length
+    });
+
+    setNewRankName('');
+    setNewRankLocation('');
+    setNewRankCapacity('');
+    setNewRankDescription('');
+    setNewRankLatitude('');
+    setNewRankLongitude('');
+    setNumberOfAisles('');
+    setAisles([]);
+    setShowAddModal(false);
+  };
+
+  return (
+    <div className="taxi-ranks-panel">
+      <div className="panel-header">
+        <h2>📍 Taxi Ranks Management</h2>
+        <button
+          className="add-btn"
+          onClick={() => setShowAddModal(true)}
+        >
+          ➕ Add Rank
+        </button>
+      </div>
+
+      <div className="ranks-grid">
+        {taxiRanks.map(rank => (
+          <div key={rank.id} className="rank-card">
+            <div className="rank-header">
+              <h3>{rank.name}</h3>
+              <span className="rank-location">📍 {rank.address || (typeof rank.location === 'string' ? rank.location : rank.location?.lat ? `${rank.location.lat.toFixed(4)}, ${rank.location.lng.toFixed(4)}` : 'Location not set')}</span>
+            </div>
+            <div className="rank-details">
+              {rank.description && <p>📝 {rank.description}</p>}
+              <p>👥 Capacity: {rank.capacity || 'Not set'}</p>
+              {rank.aisles && rank.aisles.length > 0 && (
+                <p>🚦 Aisles: {rank.aisles.length} 
+                  <span style={{ fontSize: '0.75rem', color: '#666', marginLeft: '8px' }}>
+                    ({rank.aisles.map(a => a.name).join(', ')})
+                  </span>
+                </p>
+              )}
+              {rank.location?.lat && rank.location?.lng && (
+                <p>
+                  📍 GPS: {rank.location.lat.toFixed(4)}, {rank.location.lng.toFixed(4)}
+                  <a 
+                    href={`https://www.google.com/maps?q=${rank.location.lat},${rank.location.lng}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ marginLeft: '8px', color: '#2196F3', fontSize: '0.75rem' }}
+                  >
+                    View Map →
+                  </a>
+                </p>
+              )}
+              <p>📅 Created: {rank.createdAt?.toDate().toLocaleDateString()}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {taxiRanks.length === 0 && (
+        <div className="empty-state">
+          <p>No taxi ranks available. Add your first rank!</p>
+        </div>
+      )}
+
+      {/* Add Rank Modal */}
+      {showAddModal && (
+        <div className="modal-overlay" onClick={() => setShowAddModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>Add New Taxi Rank</h3>
+
+            <div className="form-group">
+              <label>Rank Name *</label>
+              <input
+                type="text"
+                value={newRankName}
+                onChange={(e) => setNewRankName(e.target.value)}
+                placeholder="e.g., Central Station Rank"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Location / Address *</label>
+              <input
+                type="text"
+                value={newRankLocation}
+                onChange={(e) => setNewRankLocation(e.target.value)}
+                placeholder="e.g., Main Street, Cape Town"
+                required
+              />
+              <small style={{ fontSize: '0.75rem', color: '#666', display: 'block', marginTop: '4px' }}>
+                Enter the physical address of the taxi rank
+              </small>
+            </div>
+
+            <div style={{ 
+              border: '1px solid #e0e0e0', 
+              borderRadius: '8px', 
+              padding: '15px', 
+              backgroundColor: '#f9f9f9',
+              marginBottom: '15px'
+            }}>
+              <label style={{ fontWeight: 'bold', marginBottom: '10px', display: 'block' }}>
+                📍 GPS Coordinates (Required for User App)
+              </label>
+              <p style={{ fontSize: '0.75rem', color: '#666', marginBottom: '10px' }}>
+                Add coordinates so users can find this rank and get directions
+              </p>
+              
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                <div className="form-group" style={{ marginBottom: '0' }}>
+                  <label>Latitude *</label>
+                  <input
+                    type="text"
+                    value={newRankLatitude}
+                    onChange={(e) => setNewRankLatitude(e.target.value)}
+                    placeholder="-33.9249"
+                    required
+                  />
+                </div>
+                <div className="form-group" style={{ marginBottom: '0' }}>
+                  <label>Longitude *</label>
+                  <input
+                    type="text"
+                    value={newRankLongitude}
+                    onChange={(e) => setNewRankLongitude(e.target.value)}
+                    placeholder="18.4241"
+                    required
+                  />
+                </div>
+              </div>
+              
+              <button 
+                type="button"
+                onClick={() => {
+                  if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                      (position) => {
+                        setNewRankLatitude(position.coords.latitude.toString());
+                        setNewRankLongitude(position.coords.longitude.toString());
+                        alert('✅ Current location captured!');
+                      },
+                      (error) => {
+                        alert('Unable to get location. Please enter coordinates manually.');
+                      }
+                    );
+                  } else {
+                    alert('Geolocation is not supported by your browser');
+                  }
+                }}
+                style={{
+                  marginTop: '10px',
+                  padding: '8px 12px',
+                  fontSize: '0.875rem',
+                  backgroundColor: '#4CAF50',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer'
+                }}
+              >
+                📍 Use My Current Location
+              </button>
+              
+              <p style={{ fontSize: '0.7rem', color: '#999', marginTop: '8px' }}>
+                Tip: You can find coordinates on Google Maps by right-clicking a location
+              </p>
+            </div>
+
+            <div className="form-group">
+              <label>Description (Optional)</label>
+              <textarea
+                value={newRankDescription}
+                onChange={(e) => setNewRankDescription(e.target.value)}
+                placeholder="Additional details about this rank..."
+                rows="2"
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Capacity (Optional)</label>
+              <input
+                type="number"
+                value={newRankCapacity}
+                onChange={(e) => setNewRankCapacity(e.target.value)}
+                placeholder="e.g., 50"
+                min="0"
+              />
+            </div>
+
+            {/* Aisle Configuration */}
+            <div style={{ 
+              border: '1px solid #e0e0e0', 
+              borderRadius: '8px', 
+              padding: '15px', 
+              backgroundColor: '#f9f9f9',
+              marginBottom: '15px'
+            }}>
+              <label style={{ fontWeight: 'bold', marginBottom: '10px', display: 'block' }}>
+                🚦 Aisle Configuration (Optional)
+              </label>
+              <p style={{ fontSize: '0.75rem', color: '#666', marginBottom: '10px' }}>
+                Define lanes/aisles for better taxi organization
+              </p>
+
+              <div className="form-group" style={{ marginBottom: '10px' }}>
+                <label>Number of Aisles</label>
+                <input
+                  type="number"
+                  value={numberOfAisles}
+                  onChange={(e) => handleAisleCountChange(e.target.value)}
+                  placeholder="e.g., 4"
+                  min="0"
+                  max="20"
+                />
+              </div>
+
+              {aisles.length > 0 && (
+                <div style={{ marginTop: '15px' }}>
+                  <p style={{ fontSize: '0.875rem', fontWeight: 'bold', marginBottom: '10px' }}>
+                    Configure Each Aisle:
+                  </p>
+                  {aisles.map((aisle, index) => (
+                    <div key={index} style={{ 
+                      backgroundColor: 'white', 
+                      padding: '10px', 
+                      marginBottom: '8px', 
+                      borderRadius: '6px',
+                      border: '1px solid #ddd'
+                    }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '10px' }}>
+                        <div>
+                          <label style={{ fontSize: '0.75rem' }}>Aisle Name</label>
+                          <input
+                            type="text"
+                            value={aisle.name}
+                            onChange={(e) => updateAisleName(index, e.target.value)}
+                            placeholder={`Aisle ${index + 1}`}
+                            style={{ width: '100%', padding: '6px', fontSize: '0.875rem' }}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ fontSize: '0.75rem' }}>Capacity</label>
+                          <input
+                            type="number"
+                            value={aisle.capacity}
+                            onChange={(e) => updateAisleCapacity(index, e.target.value)}
+                            placeholder="10"
+                            min="0"
+                            style={{ width: '100%', padding: '6px', fontSize: '0.875rem' }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="modal-actions">
+              <button className="primary-btn" onClick={handleAddRank}>
+                Add Rank
+              </button>
+              <button className="secondary-btn" onClick={() => setShowAddModal(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// TaxisPanel Component
+function TaxisPanel({ taxis, onAddTaxi, showAddModal, setShowAddModal, searchReg, setSearchReg, taxiRanks }) {
+  const [newTaxiReg, setNewTaxiReg] = useState('');
+  const [newTaxiDriver, setNewTaxiDriver] = useState('');
+  const [newTaxiPhone, setNewTaxiPhone] = useState('');
+  const [newTaxiRank, setNewTaxiRank] = useState('');
+  const [newTaxiAisle, setNewTaxiAisle] = useState('');
+
+  const filteredTaxis = taxis.filter(taxi =>
+    taxi.registration?.toLowerCase().includes(searchReg.toLowerCase()) ||
+    taxi.driverName?.toLowerCase().includes(searchReg.toLowerCase())
+  );
+
+  const selectedRank = taxiRanks?.find(r => r.name === newTaxiRank);
+
+  const handleAddTaxi = () => {
+    if (!newTaxiReg || !newTaxiDriver) {
+      alert('Please fill in all required fields');
+      return;
+    }
+
+    onAddTaxi({
+      registration: newTaxiReg,
+      driverName: newTaxiDriver,
+      driverPhone: newTaxiPhone,
+      assignedRank: newTaxiRank,
+      assignedAisle: newTaxiAisle
+    });
+
+    setNewTaxiReg('');
+    setNewTaxiDriver('');
+    setNewTaxiPhone('');
+    setNewTaxiRank('');
+    setNewTaxiAisle('');
+    setShowAddModal(false);
+  };
+
+  return (
+    <div className="taxis-panel">
+      <div className="panel-header">
+        <h2>🚖 Taxi Management</h2>
+        <button
+          className="add-btn"
+          onClick={() => setShowAddModal(true)}
+        >
+          ➕ Add Taxi
+        </button>
+      </div>
+
+      <div className="search-bar">
+        <input
+          type="text"
+          placeholder="Search by registration or driver name..."
+          value={searchReg}
+          onChange={(e) => setSearchReg(e.target.value)}
+          className="search-input"
+        />
+      </div>
+
+      <div className="taxis-grid">
+        {filteredTaxis.map(taxi => (
+          <div key={taxi.id} className="taxi-card">
+            <div className="taxi-header">
+              <h3>{taxi.registration}</h3>
+              <span className="taxi-status">Active</span>
+            </div>
+            <div className="taxi-details">
+              <p>👤 {taxi.driverName}</p>
+              <p>📱 {taxi.driverPhone || 'No phone'}</p>
+              <p>📍 {taxi.assignedRank || 'No rank assigned'}</p>
+              {taxi.assignedAisle && <p>🚦 Aisle: {taxi.assignedAisle}</p>}
+              <p>📦 Total Loads: {taxi.totalLoads || 0}</p>
+              <p>Last Load: {taxi.lastLoad?.toDate().toLocaleDateString() || 'Never'}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Add Taxi Modal */}
+      {showAddModal && (
+        <div className="modal-overlay" onClick={() => setShowAddModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>Add New Taxi</h3>
+
+            <div className="form-group">
+              <label>Registration Number *</label>
+              <input
+                type="text"
+                value={newTaxiReg}
+                onChange={(e) => setNewTaxiReg(e.target.value)}
+                placeholder="e.g., CA 123 456"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Driver Name *</label>
+              <input
+                type="text"
+                value={newTaxiDriver}
+                onChange={(e) => setNewTaxiDriver(e.target.value)}
+                placeholder="e.g., John Smith"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Driver Phone</label>
+              <input
+                type="tel"
+                value={newTaxiPhone}
+                onChange={(e) => setNewTaxiPhone(e.target.value)}
+                placeholder="+27 12 345 6789"
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Assigned Rank</label>
+              <input
+                type="text"
+                value={newTaxiRank}
+                onChange={(e) => setNewTaxiRank(e.target.value)}
+                placeholder="e.g., Central Station"
+              />
+            </div>
+
+            {newTaxiRank && selectedRank && selectedRank.aisles && selectedRank.aisles.length > 0 && (
+              <div className="form-group">
+                <label>Assigned Aisle</label>
+                <select
+                  value={newTaxiAisle}
+                  onChange={(e) => setNewTaxiAisle(e.target.value)}
+                >
+                  <option value="">-- Select Aisle --</option>
+                  {selectedRank.aisles.map((aisle, index) => (
+                    <option key={index} value={aisle.name}>
+                      {aisle.name} (Capacity: {aisle.capacity})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="modal-actions">
+              <button className="primary-btn" onClick={handleAddTaxi}>
+                Add Taxi
+              </button>
+              <button className="secondary-btn" onClick={() => setShowAddModal(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// LoadsPanel Component
+function LoadsPanel({ loads, timeFilter, setTimeFilter }) {
+  const filteredLoads = loads.filter(load => {
+    const loadDate = load.timestamp?.toDate();
+    const now = new Date();
+
+    if (timeFilter === 'today') {
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      return loadDate >= today;
+    } else if (timeFilter === 'week') {
+      const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      return loadDate >= weekAgo;
+    } else if (timeFilter === 'month') {
+      const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      return loadDate >= monthAgo;
+    }
+    return true;
+  });
+
+  return (
+    <div className="loads-panel">
+      <div className="panel-header">
+        <h2>📦 Load Records</h2>
+        <div className="time-filter">
+          <select value={timeFilter} onChange={(e) => setTimeFilter(e.target.value)}>
+            <option value="today">Today</option>
+            <option value="week">This Week</option>
+            <option value="month">This Month</option>
+            <option value="all">All Time</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="table-container">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Registration</th>
+              <th>Driver</th>
+              <th>Marshal</th>
+              <th>Rank</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredLoads.map(load => (
+              <tr key={load.id}>
+                <td>{load.timestamp?.toDate().toLocaleString()}</td>
+                <td>{load.registration}</td>
+                <td>{load.driverName}</td>
+                <td>{load.marshalEmail}</td>
+                <td>{load.marshalRank}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {filteredLoads.length === 0 && (
+        <div className="empty-state">
+          <p>No loads recorded for the selected period</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// PaymentsPanel Component
+function PaymentsPanel({ payments, taxis, onRecordPayment, showPaymentModal, setShowPaymentModal }) {
+  const [selectedTaxi, setSelectedTaxi] = useState('');
+  const [paymentAmount, setPaymentAmount] = useState('');
+  const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split('T')[0]);
+  const [paymentNotes, setPaymentNotes] = useState('');
+
+  const handleRecordPayment = () => {
+    if (!selectedTaxi || !paymentAmount) {
+      alert('Please select a taxi and enter payment amount');
+      return;
+    }
+
+    const taxi = taxis.find(t => t.id === selectedTaxi);
+    onRecordPayment({
+      taxiId: selectedTaxi,
+      registration: taxi.registration,
+      driverName: taxi.driverName,
+      amount: parseFloat(paymentAmount),
+      paymentDate: Timestamp.fromDate(new Date(paymentDate)),
+      notes: paymentNotes
+    });
+
+    setSelectedTaxi('');
+    setPaymentAmount('');
+    setPaymentDate(new Date().toISOString().split('T')[0]);
+    setPaymentNotes('');
+    setShowPaymentModal(false);
+  };
+
+  return (
+    <div className="payments-panel">
+      <div className="panel-header">
+        <h2>💰 Payment Records</h2>
+        <button
+          className="add-btn"
+          onClick={() => setShowPaymentModal(true)}
+        >
+          ➕ Record Payment
+        </button>
+      </div>
+
+      <div className="table-container">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Registration</th>
+              <th>Driver</th>
+              <th>Amount</th>
+              <th>Recorded By</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {payments.map(payment => (
+              <tr key={payment.id}>
+                <td>{payment.paymentDate?.toDate().toLocaleDateString()}</td>
+                <td>{payment.registration}</td>
+                <td>{payment.driverName}</td>
+                <td>R{payment.amount?.toFixed(2)}</td>
+                <td>{payment.recordedBy}</td>
+                <td>{payment.notes || '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {payments.length === 0 && (
+        <div className="empty-state">
+          <p>No payments recorded yet</p>
+        </div>
+      )}
+
+      {/* Record Payment Modal */}
+      {showPaymentModal && (
+        <div className="modal-overlay" onClick={() => setShowPaymentModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>Record Payment</h3>
+
+            <div className="form-group">
+              <label>Select Taxi *</label>
+              <select
+                value={selectedTaxi}
+                onChange={(e) => setSelectedTaxi(e.target.value)}
+                required
+              >
+                <option value="">-- Select Taxi --</option>
+                {taxis.map(taxi => (
+                  <option key={taxi.id} value={taxi.id}>
+                    {taxi.registration} - {taxi.driverName}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label>Payment Amount (R) *</label>
+              <input
+                type="number"
+                value={paymentAmount}
+                onChange={(e) => setPaymentAmount(e.target.value)}
+                placeholder="0.00"
+                step="0.01"
+                min="0"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Payment Date *</label>
+              <input
+                type="date"
+                value={paymentDate}
+                onChange={(e) => setPaymentDate(e.target.value)}
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Notes</label>
+              <textarea
+                value={paymentNotes}
+                onChange={(e) => setPaymentNotes(e.target.value)}
+                placeholder="Optional notes..."
+                rows="3"
+              />
+            </div>
+
+            <div className="modal-actions">
+              <button className="primary-btn" onClick={handleRecordPayment}>
+                Record Payment
+              </button>
+              <button className="secondary-btn" onClick={() => setShowPaymentModal(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// MeetingsPanel Component
+function MeetingsPanel({ meetings, onCreateMeeting, showMeetingModal, setShowMeetingModal }) {
+  const [meetingTitle, setMeetingTitle] = useState('');
+  const [meetingDate, setMeetingDate] = useState('');
+  const [meetingTime, setMeetingTime] = useState('');
+  const [meetingLocation, setMeetingLocation] = useState('');
+  const [meetingAgenda, setMeetingAgenda] = useState('');
+
+  const handleCreateMeeting = () => {
+    if (!meetingTitle || !meetingDate || !meetingTime || !meetingLocation) {
+      alert('Please fill in all required fields');
+      return;
+    }
+
+    onCreateMeeting({
+      title: meetingTitle,
+      meetingDate: Timestamp.fromDate(new Date(`${meetingDate}T${meetingTime}`)),
+      location: meetingLocation,
+      agenda: meetingAgenda,
+      status: 'scheduled'
+    });
+
+    setMeetingTitle('');
+    setMeetingDate('');
+    setMeetingTime('');
+    setMeetingLocation('');
+    setMeetingAgenda('');
+    setShowMeetingModal(false);
+  };
+
+  return (
+    <div className="meetings-panel">
+      <div className="panel-header">
+        <h2>📅 Meeting Management</h2>
+        <button
+          className="add-btn"
+          onClick={() => setShowMeetingModal(true)}
+        >
+          ➕ Schedule Meeting
+        </button>
+      </div>
+
+      <div className="meetings-list">
+        {meetings.map(meeting => (
+          <div key={meeting.id} className="meeting-card">
+            <div className="meeting-header">
+              <h3>{meeting.title}</h3>
+              <span className={`meeting-status status-${meeting.status || 'scheduled'}`}>
+                {meeting.status || 'Scheduled'}
+              </span>
+            </div>
+            <div className="meeting-details">
+              <p>📅 {meeting.meetingDate?.toDate().toLocaleString()}</p>
+              <p>📍 {meeting.location}</p>
+              <p>📝 {meeting.agenda || 'No agenda set'}</p>
+              <p>Created by: {meeting.createdBy}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {meetings.length === 0 && (
+        <div className="empty-state">
+          <p>No meetings scheduled</p>
+        </div>
+      )}
+
+      {/* Create Meeting Modal */}
+      {showMeetingModal && (
+        <div className="modal-overlay" onClick={() => setShowMeetingModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>Schedule New Meeting</h3>
+
+            <div className="form-group">
+              <label>Meeting Title *</label>
+              <input
+                type="text"
+                value={meetingTitle}
+                onChange={(e) => setMeetingTitle(e.target.value)}
+                placeholder="e.g., Weekly Marshal Meeting"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Date *</label>
+              <input
+                type="date"
+                value={meetingDate}
+                onChange={(e) => setMeetingDate(e.target.value)}
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Time *</label>
+              <input
+                type="time"
+                value={meetingTime}
+                onChange={(e) => setMeetingTime(e.target.value)}
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Location *</label>
+              <input
+                type="text"
+                value={meetingLocation}
+                onChange={(e) => setMeetingLocation(e.target.value)}
+                placeholder="e.g., Central Station Office"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Agenda</label>
+              <textarea
+                value={meetingAgenda}
+                onChange={(e) => setMeetingAgenda(e.target.value)}
+                placeholder="Meeting agenda and topics..."
+                rows="4"
+              />
+            </div>
+
+            <div className="modal-actions">
+              <button className="primary-btn" onClick={handleCreateMeeting}>
+                Schedule Meeting
+              </button>
+              <button className="secondary-btn" onClick={() => setShowMeetingModal(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
