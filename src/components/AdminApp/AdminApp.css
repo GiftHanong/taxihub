@@ -1380,7 +1380,7 @@ button, .btn {
 }
 
 /* ===================================
-   DARK MODE SUPPORT
+   DARK MODE 
    =================================== */
 @media (prefers-color-scheme: dark) {
   :root {
