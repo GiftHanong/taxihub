@@ -14,6 +14,7 @@ function UserApp() {
   const [selectedRank, setSelectedRank] = useState(null);
   const [loading, setLoading] = useState(true);
   const [userLocation, setUserLocation] = useState(null);
+  const [locationError, setLocationError] = useState(null);
   const [viewMode, setViewMode] = useState('list');
   const [sortBy, setSortBy] = useState('distance');
   const [searchHistory, setSearchHistory] = useState([]);
@@ -55,7 +56,7 @@ function UserApp() {
         id: doc.id,
         ...doc.data()
       }));
-      
+
       if (ranks.length > 0) {
         setTaxiRanks(ranks);
         await storage.saveTaxiRanks(ranks);
@@ -67,32 +68,54 @@ function UserApp() {
     }
   };
 
-  // Get user's current location
+  // Get user's current location with improved error handling
   const getUserLocation = () => {
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          setUserLocation({
-            lat: position.coords.latitude,
-            lng: position.coords.longitude
-          });
-        },
-        (error) => {
-          console.error('Error getting location:', error);
-        },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-      );
+    if (!navigator.geolocation) {
+      setLocationError('Geolocation is not supported by this browser');
+      return;
     }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setUserLocation({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude
+        });
+        setLocationError(null); // Clear any previous errors
+      },
+      (error) => {
+        console.error('Error getting location:', error);
+        let errorMessage = 'Unable to get your location. ';
+
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            errorMessage += 'Location access was denied. Please enable location permissions in your browser settings.';
+            break;
+          case error.POSITION_UNAVAILABLE:
+            errorMessage += 'Location information is unavailable.';
+            break;
+          case error.TIMEOUT:
+            errorMessage += 'Location request timed out.';
+            break;
+          default:
+            errorMessage += 'An unknown error occurred.';
+            break;
+        }
+
+        setLocationError(errorMessage);
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
   };
 
   // Calculate distance between two coordinates using Haversine formula
   const calculateDistance = (lat1, lon1, lat2, lon2) => {
     if (!lat1 || !lon1 || !lat2 || !lon2) return Infinity;
-    
+
     const R = 6371; // Earth's radius in km
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = 
+    const a =
       Math.sin(dLat/2) * Math.sin(dLat/2) +
       Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
       Math.sin(dLon/2) * Math.sin(dLon/2);
@@ -109,32 +132,39 @@ function UserApp() {
 
     const searchTerm = destination.toLowerCase();
     const filtered = taxiRanks.filter(rank => {
-      // Search in destinations
-      const matchesDestinations = rank.destinations?.some(dest => 
+      // Search in routes (departure, destination, fare)
+      const matchesRoutes = rank.routes?.some(route =>
+        route.departure?.toLowerCase().includes(searchTerm) ||
+        route.destination?.toLowerCase().includes(searchTerm) ||
+        route.fare?.toString().includes(searchTerm)
+      );
+
+      // Search in destinations (legacy support)
+      const matchesDestinations = rank.destinations?.some(dest =>
         dest.toLowerCase().includes(searchTerm)
       );
-      
+
       // Search in rank name
       const matchesName = rank.name?.toLowerCase().includes(searchTerm);
-      
+
       // Search in address
       const matchesAddress = rank.address?.toLowerCase().includes(searchTerm);
-      
+
       // Search in description
       const matchesDescription = rank.description?.toLowerCase().includes(searchTerm);
-      
+
       // Search in aisle routes
-      const matchesAisles = rank.aisles?.some(aisle => 
+      const matchesAisles = rank.aisles?.some(aisle =>
         aisle.name?.toLowerCase().includes(searchTerm) ||
         aisle.routes?.some(route => route.toLowerCase().includes(searchTerm))
       );
 
-      return matchesDestinations || matchesName || matchesAddress || matchesDescription || matchesAisles;
+      return matchesRoutes || matchesDestinations || matchesName || matchesAddress || matchesDescription || matchesAisles;
     });
 
     const sorted = sortRanks(filtered);
     setFilteredRanks(sorted);
-    
+
     // Save to search history
     saveSearchToHistory(destination);
   };
@@ -149,7 +179,7 @@ function UserApp() {
 
     const nearby = taxiRanks.filter(rank => {
       if (!rank.location?.lat || !rank.location?.lng) return false;
-      
+
       const distance = calculateDistance(
         userLocation.lat, userLocation.lng,
         rank.location.lat, rank.location.lng
@@ -163,7 +193,7 @@ function UserApp() {
 
   // Show favorite ranks
   const showFavoriteRanks = () => {
-    const favoriteRanksList = taxiRanks.filter(rank => 
+    const favoriteRanksList = taxiRanks.filter(rank =>
       favorites.includes(rank.id)
     );
     const sorted = sortRanks(favoriteRanksList);
@@ -173,7 +203,7 @@ function UserApp() {
   // Sort ranks by selected criteria
   const sortRanks = (ranks) => {
     const sorted = [...ranks];
-    
+
     switch (sortBy) {
       case 'distance':
         if (userLocation) {
@@ -190,11 +220,11 @@ function UserApp() {
           });
         }
         break;
-      
+
       case 'name':
         sorted.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
         break;
-      
+
       case 'recent':
         sorted.sort((a, b) => {
           const dateA = a.createdAt?.toDate() || new Date(0);
@@ -202,15 +232,15 @@ function UserApp() {
           return dateB - dateA;
         });
         break;
-      
+
       case 'capacity':
         sorted.sort((a, b) => (b.capacity || 0) - (a.capacity || 0));
         break;
-      
+
       case 'routes':
         sorted.sort((a, b) => getTotalRoutes(b) - getTotalRoutes(a));
         break;
-      
+
       default:
         break;
     }
@@ -233,7 +263,7 @@ function UserApp() {
     if (!rank.aisles || rank.aisles.length === 0) {
       return rank.destinations?.length || 0;
     }
-    return rank.aisles.reduce((total, aisle) => 
+    return rank.aisles.reduce((total, aisle) =>
       total + (aisle.routes?.length || 0), 0
     );
   };
@@ -277,7 +307,7 @@ function UserApp() {
     const newFavorites = favorites.includes(rankId)
       ? favorites.filter(id => id !== rankId)
       : [...favorites, rankId];
-    
+
     setFavorites(newFavorites);
     storage.saveFavorites(newFavorites);
   };
@@ -293,12 +323,12 @@ function UserApp() {
   // Save search to history
   const saveSearchToHistory = async (search) => {
     if (!search.trim()) return;
-    
+
     const newHistory = [
       search,
       ...searchHistory.filter(item => item !== search)
     ].slice(0, 10); // Keep last 10 searches
-    
+
     setSearchHistory(newHistory);
     await storage.saveSearchHistory(newHistory);
   };
@@ -363,6 +393,12 @@ function UserApp() {
             <span>Location Active</span>
           </div>
         )}
+        {locationError && (
+          <div className="location-error">
+            <span className="error-icon">⚠️</span>
+            <span>Location Error</span>
+          </div>
+        )}
       </header>
 
       {/* Main Container */}
@@ -392,6 +428,16 @@ function UserApp() {
             </button>
           </div>
 
+          {/* Location Error Message */}
+          {locationError && (
+            <div className="location-error-message">
+              <p>⚠️ {locationError}</p>
+              <button onClick={getUserLocation} className="retry-location-btn">
+                Try Again
+              </button>
+            </div>
+          )}
+
           {/* Search History Suggestions */}
           {searchHistory.length > 0 && !destination && (
             <div className="search-suggestions">
@@ -413,7 +459,7 @@ function UserApp() {
 
           {/* Quick Actions */}
           <div className="quick-actions">
-            <button 
+            <button
               className={`action-btn ${viewMode === 'nearby' ? 'active' : ''}`}
               onClick={() => setViewMode('nearby')}
               disabled={!userLocation}
@@ -422,14 +468,14 @@ function UserApp() {
               <span className="btn-icon">📍</span>
               Nearby Ranks
             </button>
-            <button 
+            <button
               className={`action-btn ${viewMode === 'list' ? 'active' : ''}`}
               onClick={showAllRanks}
             >
               <span className="btn-icon">📋</span>
               All Ranks
             </button>
-            <button 
+            <button
               className={`action-btn ${viewMode === 'favorites' ? 'active' : ''}`}
               onClick={() => setViewMode('favorites')}
               title="Show your favorite ranks"
@@ -440,7 +486,7 @@ function UserApp() {
                 <span className="badge">{favorites.length}</span>
               )}
             </button>
-            <button 
+            <button
               className="action-btn"
               onClick={getUserLocation}
               title="Refresh location"
@@ -452,7 +498,7 @@ function UserApp() {
 
           {/* Filters */}
           <div className="filters-section">
-            <button 
+            <button
               className="filters-toggle"
               onClick={() => setShowFilters(!showFilters)}
             >
@@ -641,6 +687,25 @@ function UserApp() {
                           )}
                         </div>
 
+                        {/* Routes */}
+                        {rank.routes && rank.routes.length > 0 && (
+                          <div className="rank-routes">
+                            <strong>Available routes:</strong>
+                            <div className="route-tags">
+                              {rank.routes.slice(0, 3).map((route, index) => (
+                                <span key={index} className="route-tag">
+                                  {route.departure} → {route.destination} (R{route.fare})
+                                </span>
+                              ))}
+                              {rank.routes.length > 3 && (
+                                <span className="route-tag more">
+                                  +{rank.routes.length - 3} more
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
                         {/* Destinations */}
                         {rank.destinations && rank.destinations.length > 0 && (
                           <div className="rank-destinations">
@@ -706,6 +771,20 @@ function UserApp() {
               <div className="modal-section">
                 <h3>📝 About</h3>
                 <p>{selectedRank.description}</p>
+              </div>
+            )}
+
+            {/* Routes */}
+            {selectedRank.routes && selectedRank.routes.length > 0 && (
+              <div className="modal-section">
+                <h3>🛣️ Available Routes</h3>
+                <div className="modal-tags">
+                  {selectedRank.routes.map((route, index) => (
+                    <span key={index} className="modal-tag">
+                      {route.departure} → {route.destination} (R{route.fare})
+                    </span>
+                  ))}
+                </div>
               </div>
             )}
 

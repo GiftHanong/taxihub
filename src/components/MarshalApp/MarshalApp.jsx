@@ -4,7 +4,6 @@ import { Link } from 'react-router-dom';
 import { auth, db } from '../../services/firebase';
 import { signInWithEmailAndPassword, signOut, createUserWithEmailAndPassword } from 'firebase/auth';
 import { collection, addDoc, getDocs, query, where, updateDoc, doc, orderBy, Timestamp, deleteDoc, limit, getDoc, setDoc } from 'firebase/firestore';
-import storage from '../../services/storage';
 import './MarshalApp.css';
 
 function MarshalApp() {
@@ -214,9 +213,7 @@ function MarshalApp() {
       <div className="marshal-app">
         <header className="marshal-header">
           <Link to="/" className="back-btn">← Back to Home</Link>
-          <h1>
-            {isRegistering ? '🛡️ Marshal Registration' : '🛡️ Queue Marshal Login'}
-          </h1>
+          <h1>🛡️ TaxiHub Marshal Login 🔐</h1>
         </header>
 
         <div className="login-container">
@@ -379,13 +376,13 @@ function MarshalDashboard({ user, marshalProfile, onLogout }) {
   // Role-based permission checker
   const hasPermission = (action) => {
     if (!marshalProfile || !marshalProfile.role) return false;
-    
+
     const permissions = {
-      'Admin': ['view', 'approve_users', 'assign_roles', 'manage_users', 'view_reports', 'system_settings'],
+      'Admin': ['view', 'approve_users', 'assign_roles', 'manage_users', 'view_reports', 'system_settings', 'add_ranks'],
       'Supervisor': ['view', 'view_reports'],
-      'Marshal': ['view', 'add_ranks', 'add_taxis', 'record_loads', 'record_payments', 'manage_meetings']
+      'Marshal': ['view', 'add_taxis', 'record_loads', 'record_payments', 'manage_meetings']
     };
-    
+
     return permissions[marshalProfile.role]?.includes(action) || false;
   };
 
@@ -681,7 +678,7 @@ function MarshalDashboard({ user, marshalProfile, onLogout }) {
       } else if (role === 'Supervisor') {
         permissions = ['view', 'view_reports'];
       } else if (role === 'Marshal') {
-        permissions = ['view', 'add_ranks', 'add_taxis', 'record_loads', 'record_payments', 'manage_meetings'];
+        permissions = ['view', 'add_taxis', 'record_loads', 'record_payments', 'manage_meetings'];
       }
 
       const userRef = doc(db, 'marshalls', userId);
@@ -1313,7 +1310,7 @@ function AdminPanel({ pendingUsers, approvedMarshals, taxiRanks, onApproveUser, 
   const [newRankDescription, setNewRankDescription] = useState('');
   const [newRankLatitude, setNewRankLatitude] = useState('');
   const [newRankLongitude, setNewRankLongitude] = useState('');
-  const [newRankDestinations, setNewRankDestinations] = useState(['']);
+  const [newRankRoutes, setNewRankRoutes] = useState([{ departure: '', destination: '', fare: '' }]);
   const [selectedRankId, setSelectedRankId] = useState('');
   const [selectedMarshalIds, setSelectedMarshalIds] = useState([]);
   const [rankToManage, setRankToManage] = useState(null);
@@ -1400,7 +1397,8 @@ function AdminPanel({ pendingUsers, approvedMarshals, taxiRanks, onApproveUser, 
         createdAt: Timestamp.now(),
         assignedMarshals: [],
         status: 'active',
-        destinations: [], // Initialize empty destinations array
+        destinations: [], // Keep for backward compatibility
+        routes: newRankRoutes.filter(route => route.departure && route.destination && route.fare), // Save routes with fares
         aisles: [] // Initialize empty aisles array
       };
 
@@ -2071,6 +2069,115 @@ function AdminPanel({ pendingUsers, approvedMarshals, taxiRanks, onApproveUser, 
                 placeholder="Additional details about this rank..."
                 rows="3"
               />
+            </div>
+
+            {/* Routes Configuration */}
+            <div style={{
+              border: '1px solid #e0e0e0',
+              borderRadius: '8px',
+              padding: '15px',
+              backgroundColor: '#f9f9f9',
+              marginBottom: '15px'
+            }}>
+              <label style={{ fontWeight: 'bold', marginBottom: '10px', display: 'block' }}>
+                🛣️ Routes & Fares (Optional)
+              </label>
+              <p style={{ fontSize: '0.75rem', color: '#666', marginBottom: '10px' }}>
+                Add routes with departure, destination, and fare information for users to see available options.
+              </p>
+
+              {newRankRoutes.map((route, index) => (
+                <div key={index} style={{
+                  backgroundColor: 'white',
+                  padding: '10px',
+                  marginBottom: '8px',
+                  borderRadius: '6px',
+                  border: '1px solid #ddd'
+                }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 2fr 1fr auto', gap: '10px', alignItems: 'center' }}>
+                    <div>
+                      <label style={{ fontSize: '0.75rem', fontWeight: 'bold' }}>Departure</label>
+                      <input
+                        type="text"
+                        value={route.departure}
+                        onChange={(e) => {
+                          const updated = [...newRankRoutes];
+                          updated[index].departure = e.target.value;
+                          setNewRankRoutes(updated);
+                        }}
+                        placeholder="From location"
+                        style={{ width: '100%', padding: '6px', fontSize: '0.875rem' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '0.75rem', fontWeight: 'bold' }}>Destination</label>
+                      <input
+                        type="text"
+                        value={route.destination}
+                        onChange={(e) => {
+                          const updated = [...newRankRoutes];
+                          updated[index].destination = e.target.value;
+                          setNewRankRoutes(updated);
+                        }}
+                        placeholder="To location"
+                        style={{ width: '100%', padding: '6px', fontSize: '0.875rem' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '0.75rem', fontWeight: 'bold' }}>Fare (R)</label>
+                      <input
+                        type="number"
+                        value={route.fare}
+                        onChange={(e) => {
+                          const updated = [...newRankRoutes];
+                          updated[index].fare = e.target.value;
+                          setNewRankRoutes(updated);
+                        }}
+                        placeholder="0.00"
+                        step="0.01"
+                        min="0"
+                        style={{ width: '100%', padding: '6px', fontSize: '0.875rem' }}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const updated = newRankRoutes.filter((_, i) => i !== index);
+                        setNewRankRoutes(updated.length > 0 ? updated : [{ departure: '', destination: '', fare: '' }]);
+                      }}
+                      style={{
+                        backgroundColor: '#ff5252',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '4px',
+                        padding: '6px 10px',
+                        cursor: 'pointer',
+                        fontSize: '0.75rem'
+                      }}
+                      title="Remove route"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              ))}
+
+              <button
+                type="button"
+                onClick={() => setNewRankRoutes([...newRankRoutes, { departure: '', destination: '', fare: '' }])}
+                style={{
+                  marginTop: '10px',
+                  padding: '8px 12px',
+                  fontSize: '0.875rem',
+                  backgroundColor: '#4CAF50',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer'
+                }}
+              >
+                ➕ Add Another Route
+              </button>
             </div>
 
             <div className="modal-actions">

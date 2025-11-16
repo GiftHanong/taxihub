@@ -41,6 +41,26 @@ export const storage = {
   // Clear all data
   async clearAll() {
     return await localforage.clear();
+  },
+
+  // Save search history
+  async saveSearchHistory(history) {
+    return await localforage.setItem('search_history', history);
+  },
+
+  // Get search history
+  async getSearchHistory() {
+    return await localforage.getItem('search_history') || [];
+  },
+
+  // Save favorites
+  async saveFavorites(favorites) {
+    return await localforage.setItem('favorites', favorites);
+  },
+
+  // Get favorites
+  async getFavorites() {
+    return await localforage.getItem('favorites') || [];
   }
 };
 
